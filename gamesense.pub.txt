@@ -1,0 +1,49 @@
+;;
+;; Domain:     gamesense.pub.
+;; Exported:   2021-04-20 23:45:04
+;;
+;; This file is intended for use for informational and archival
+;; purposes ONLY and MUST be edited before use on a production
+;; DNS server.  In particular, you must:
+;;   -- update the SOA record with the correct authoritative name server
+;;   -- update the SOA record with the contact e-mail address information
+;;   -- update the NS record(s) with the authoritative name servers for this domain.
+;;
+;; For further information, please consult the BIND documentation
+;; located on the following website:
+;;
+;; http://www.isc.org/
+;;
+;; And RFC 1035:
+;;
+;; http://www.ietf.org/rfc/rfc1035.txt
+;;
+;; Please note that we do NOT offer technical support for any use
+;; of this zone data, the BIND name server, or any other third-party
+;; DNS software.
+;;
+;; Use at your own risk.
+;; SOA Record
+gamesense.pub.	3600	IN	SOA	gamesense.pub. root.gamesense.pub. 2037062890 7200 3600 86400 3600
+
+;; A Records
+gamesense.pub.	1	IN	A	144.217.66.241
+www.gamesense.pub.	1	IN	A	144.217.66.241
+
+;; CNAME Records
+_domainconnect.gamesense.pub.	1	IN	CNAME	connect.domains.google.com.
+
+;; MX Records
+gamesense.pub.	1	IN	MX	1 aspmx.l.google.com.
+gamesense.pub.	1	IN	MX	5 alt2.aspmx.l.google.com.
+gamesense.pub.	1	IN	MX	5 alt1.aspmx.l.google.com.
+gamesense.pub.	1	IN	MX	10 alt3.aspmx.l.google.com.
+gamesense.pub.	1	IN	MX	10 alt4.aspmx.l.google.com.
+
+;; TXT Records
+_acme-challenge.gamesense.pub.	1	IN	TXT	"xEGkqkrN2Ovpyf0baG2oPKAzROKciURwvLIMiZB_FgM"
+_acme-challenge.gamesense.pub.	1	IN	TXT	"Q3nKKua2IdPYM5gpzXUE2hSrfzHDdeWA8_zAj9isK4E"
+_dmarc.gamesense.pub.	1	IN	TXT	"v=DMARC1; p=none; rua=mailto:admin@gamesense.pub"
+gamesense.pub.	1	IN	TXT	"v=spf1 include:_spf.google.com ~all"
+gamesense.pub.	1	IN	TXT	"google-site-verification=l_hNEL_0LniJj5ot01-EpasycJCC8-7Sk3CpFgG3Fy4"
+google._domainkey.gamesense.pub.	1	IN	TXT	"v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5dTbQ9p36fMIpHBHSp2MOKcaCtWn4LyJEmuG8rWFn0AJc5aMRHhYu1XlbKjTpQZ1b8PJXEJZBXBimjJCYlyJd4Exzb5RpE+pTyVR3rycTC7A51tikpsJIyKr6kN/MiUXv5TXT9cVG9rXKpaIhdzOnXIm3BXK1T8I880DDS8OSkytz+21K+GfDvMd3qDJ3nZ4+ JO+26tqhBpflaY6VnrWobPIwW7ejrF9qwCK+ZxkQHS10Ibn6hzcprfDCbY9sgo+DxNFyQ2gLDOUr8q5Qi1ZfM/6E6gHxWWrXf22Q4yV7XSbDgkHIID9VaduTMAu0UubETpYn7hqHmg3+1idavHYBwIDAQAB"
