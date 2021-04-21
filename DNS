@@ -46,6 +46,7 @@ gamesense.pub.	1	IN	MX	10 alt3.aspmx.l.google.com.
 gamesense.pub.	1	IN	MX	10 alt4.aspmx.l.google.com.
 
 ;; TXT Records
+google-site-verification=WYHqgsHRjQflgkbAPkf6uHJZr6FP5aLIlnTeat_Swok
 _acme-challenge.gamesense.pub.	1	IN	TXT	"xEGkqkrN2Ovpyf0baG2oPKAzROKciURwvLIMiZB_FgM"
 _acme-challenge.gamesense.pub.	1	IN	TXT	"Q3nKKua2IdPYM5gpzXUE2hSrfzHDdeWA8_zAj9isK4E"
 _dmarc.gamesense.pub.	1	IN	TXT	"v=DMARC1; p=none; rua=mailto:admin@gamesense.pub"
