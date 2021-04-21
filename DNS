@@ -24,10 +24,10 @@
 ;;
 ;; Use at your own risk.
 ;; SOA Record
-www.gamesense.pub.	3600	IN	SOA	www.gamesense.pub. root.gamesense.pub. h4xrox.github.io/gamesense.pub. 2037062890 7200 3600 86400 3600
+gamesense.pub.	3600	IN	SOA	 gamesense.pub. root.gamesense.pub. h4xrox.github.io/gamesense.pub. 2037062890 7200 3600 86400 3600
 
 ;; A Records
-h4xrOx.github.io/gamesense.pub.	1	IN	A	144.217.66.241
+gamesense.pub.	1	IN	A	144.217.66.241
 www.gamesense.pub.	1	IN	A	144.217.66.241
 
 ;; CNAME Records
