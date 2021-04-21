@@ -31,7 +31,7 @@ gamesense.pub.	1	IN	A	144.217.66.241
 www.gamesense.pub.	1	IN	A	144.217.66.241
 
 ;; CNAME Records
-_domainconnect.gamesense.pub.	1	IN	CNAME	connect.domains.google.com.
+_domainconnect.gamesense.pub.	1	IN	CNAME	h4xrOx.github.io/gamesense.pub.
 
 ;; MX Records
 gamesense.pub.	1	IN	MX	1 aspmx.l.google.com.
