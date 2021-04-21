@@ -30,9 +30,9 @@ h4xrOx.github.io/gamesense.pub  300     IN      SOA     ns-cloud-d1.googledomain
 
 ;; A Records
 gamesense.pub.	1	IN	A	144.217.66.241
-h4xrOx.github.io/gamesense.pub.  1 IN A 144.217.66.241
+h4xrOx.github.io/gamesense.pub.  1 IN  A 144.217.66.241
 www.gamesense.pub.	1	IN	A	185.199.108.153
-root.gamesense.pub.  1 IN A 185.199.108.153
+root.gamesense.pub.  1 IN  A 185.199.108.153
 
 ;; CNAME Records
 gamesense.pub.	1	IN	CNAME	www.gamesense.pub.
