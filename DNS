@@ -25,6 +25,7 @@
 ;; Use at your own risk.
 ;; SOA Record
 gamesense.pub.	3600	IN	SOA	 gamesense.pub. root.gamesense.pub. h4xrox.github.io/gamesense.pub. 2037062890 7200 3600 86400 3600
+pub.                    10800   IN      SOA     demand.alpha.aridns.net.au. hostmaster.donuts.co. 1618968895 1800 900 604800 86400
 
 ;; A Records
 gamesense.pub.	1	IN	A	185.199.108.153
