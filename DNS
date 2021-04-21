@@ -35,8 +35,10 @@ root.gamesense.pub.  1 IN A 185.199.108.153
 
 ;; CNAME Records
 gamesense.pub.	1	IN	CNAME	www.gamesense.pub.
-root.gamesense.pub.  1 IN CNAME h4xr0x.github.io/gamesense.pub
-pub. 1 IN CNAME root.gamesense.pub
+root.gamesense.pub.  1 IN  CNAME h4xrOx.github.io/gamesense.pub
+pub.  1 IN  CNAME www.gamesense.pub
+zuxxke3kvz33.www.gamesense.pub. 1 IN  CNAME gv-yizro6sbgtb3fr.dv.googlehosted.com
+
 
 ;; MX Records
 gamesense.pub.	1	IN	MX	1 aspmx.l.google.com.
