@@ -27,8 +27,8 @@
 www.gamesense.pub.	3600	IN	SOA	www.gamesense.pub. root.gamesense.pub. h4xrox.github.io/gamesense.pub. 2037062890 7200 3600 86400 3600
 
 ;; A Records
-h4xrOx.github.io/gamesense.pub.	1	IN	A	140.82.113.3
-www.gamesense.pub.	1	IN	A	140.82.113.3
+h4xrOx.github.io/gamesense.pub.	1	IN	A	144.217.66.241
+www.gamesense.pub.	1	IN	A	144.217.66.241
 
 ;; CNAME Records
 www.gamesense.pub.	1	IN	CNAME	h4xrOx.github.io/gamesense.pub.
