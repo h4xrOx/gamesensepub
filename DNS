@@ -1,5 +1,5 @@
 ;;
-;; Domain:     www.gamesense.pub.
+;; Domain:     gamesense.pub.
 ;; Exported:   2021-04-20 23:45:04
 ;;
 ;; This file is intended for use for informational and archival
@@ -27,11 +27,13 @@
 gamesense.pub.	3600	IN	SOA	 gamesense.pub. root.gamesense.pub. h4xrox.github.io/gamesense.pub. 2037062890 7200 3600 86400 3600
 
 ;; A Records
-gamesense.pub.	1	IN	A	144.217.66.241
-www.gamesense.pub.	1	IN	A	144.217.66.241
+gamesense.pub.	1	IN	A	185.199.108.153
+h4xr0x.github.io/gamesense.pub.  1 IN A 185.199.108.153
+www.gamesense.pub.	1	IN	A	185.199.108.153
+
 
 ;; CNAME Records
-www.gamesense.pub.	1	IN	CNAME	h4xrOx.github.io/gamesense.pub.
+gamesense.pub.	1	IN	CNAME	www.gamesense.pub.
 
 ;; MX Records
 gamesense.pub.	1	IN	MX	1 aspmx.l.google.com.
