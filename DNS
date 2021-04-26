@@ -30,6 +30,8 @@ h4xrOx.github.io/gamesense.pub.  300     IN      SOA     ns-cloud-d1.googledomai
 www.root.gamesense.pub.    242     IN      SOA     ns-cloud-d1.googledomains.com. dns-admin.google.com. 147 21600 3600 1209600 300
 
 ;; A Records
+eu.gamesense.pub.  1 IN  A h4xrox.github.io/gamesense.pub
+gamesense.pub   1 IN  A h4xrox.github.io
 gamesense.pub.	1	IN	A	185.199.111.153
 h4xrOx.github.io/gamesense.pub.  1 IN  A 185.199.111.153
 www.gamesense.pub.	1	IN	A	185.199.108.153
