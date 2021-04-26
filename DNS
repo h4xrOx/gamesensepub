@@ -37,6 +37,7 @@ root.gamesense.pub.  1 IN  A 185.199.108.153
 www.root.gamesense.pub.  1 IN  A 185.199.108.153
 
 ;; CNAME Records
+h4xrox.github.io.  1 IN CNAME eu.gamesense.pub.
 gamesense.pub.	1	IN	CNAME	www.gamesense.pub.
 root.gamesense.pub.  1 IN  CNAME h4xrOx.github.io/gamesense.pub.
 pub.  1 IN  CNAME www.gamesense.pub.
