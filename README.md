@@ -1,4 +1,4 @@
-# gamesense #h4xr0x https://discord.gg/27XP5GPkTn  youtube: https://youtube.com/h4xrOx 
+# gamesense #h4xr0x https://discord.gg/gtHXu27HUJ  youtube: https://youtube.com/h4xrOx 
 Moderating this section: wish, esoterik and 1al9o (second coder of the loader) 
 
 Discovering hacking and leaking/cracking attempts from our server: 12/1/20
