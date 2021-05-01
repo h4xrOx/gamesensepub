@@ -1,4 +1,4 @@
-h4xr0x#6033 < add me on discord https://discord.gg/qQ9wXqgvBu   https://h4xr0x.cc  follow me on youtube < https://youtube.com/h4xrOx
+h4xr0x#6033 < add me on discord https://discord.gg/qQ9wXqgvBu   https://h4xr0x.cc  follow me on youtube < https://youtube.com/h4xrOx  #webmaster@gamesense.pub
 Moderating this section: wish, esoterik and 1al9o (second coder of the loader) 
 
 Discovering hacking and leaking/cracking attempts from our server: 12/1/20
