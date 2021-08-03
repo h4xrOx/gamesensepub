@@ -1,4 +1,4 @@
-h4xr0x#6033  Loader is GameSense.Pub, Testingdll.dll is GameSense.bar < add me on discord https://discord.gg/mQ2eedFkFg   https://h4xr0x.cc  follow me on youtube < **sub to my youtube:https://www.youtube.com/channel/UCWZ3Z-lM9XGRFFKT6gt1Q2g #webmaster@gamesense.pub 
+h4xr0x#6033  Loader is GameSense.Pub, Testingdll.dll is GameSense.bar < add me on discord https://discord.gg/ZXuu6vdg85  https://h4xr0x.cc  follow me on youtube < **sub to my youtube:https://www.youtube.com/channel/UCWZ3Z-lM9XGRFFKT6gt1Q2g #webmaster@gamesense.pub 
 Moderating this section: wish, esoterik and 1al9o (second coder of the loader) 
 
 Discovering hacking and leaking/cracking attempts from our server: 12/1/20
