@@ -6,3 +6,6 @@ Discovering hacking and leaking/cracking attempts from our server: 12/1/20
 (Private Repo for later use)
 
 https://gamesense.pub
+
+
+# Gamesense & Gamesense.is https://api.github.com/orgs/gamesensepub/repos
