@@ -1,0 +1,2584 @@
+@esotk
+esotk committed on Feb 11 
+1 parent c63fdc0 commit c1941d1b75110a3d363cea15584d2bb013cd0a5b
+Showing  with 2,564 additions and 0 deletions.
+ 8  README.md 
+@@ -0,0 +1,8 @@
+# gamesense
+Moderating this section: wish, esoterik and 1al9o (second coder of the loader) 
+
+Discovering hacking and leaking/cracking attempts from our server: 12/1/20
+
+(Private Repo for later use)
+
+https://gamesense.pub
+ 1,256  aimbot.cpp 
+@@ -0,0 +1,1256 @@
+#include "gamesense.h"
+#include "threading/CParallelProcessor.h"
+
+Aimbot g_aimbot{ };
+
+void AimPlayer::OnNetUpdate( Player* player ) {
+	bool reset = ( player->m_lifeState( ) == LIFE_DEAD || !player->enemy( g_cl.m_local ) );
+
+	if ( reset ) {
+		m_missed_shots = 0;
+		m_last_resolve = 0;
+
+		return;
+	}
+
+	// update player ptr.
+	m_player = player;
+}
+
+void AimPlayer::OnRoundStart( Player* player ) {
+	m_player = player;
+	m_shots = 0;
+	m_missed_shots = 0;
+	m_last_resolve = 0;
+	m_delta = 0;
+
+	m_hitboxes.clear( );
+
+	// IMPORTANT: DO NOT CLEAR LAST HIT SHIT.
+}
+
+void AimPlayer::CalculateHitboxData( C_Hitbox* rtn, Player* ent, int ihitbox, matrix3x4_t* matrix )
+{
+	if ( ihitbox < 0 || ihitbox > 19 ) return;
+
+	if ( !ent ) return;
+
+	const auto model = ent->GetModel( );
+
+	if ( !model )
+		return;
+
+	auto pStudioHdr = g_csgo.m_model_info->GetStudioModel( model );
+
+	if ( !pStudioHdr )
+		return;
+
+	auto hitbox = pStudioHdr->GetHitbox( ihitbox, 0 );
+
+	if ( !hitbox )
+		return;
+
+	const auto is_capsule = hitbox->m_radius != -1.f;
+
+	vec3_t min, max;
+	if ( is_capsule ) {
+		math::VectorTransform( hitbox->m_mins, matrix[ hitbox->m_bone ], min );
+		math::VectorTransform( hitbox->m_maxs, matrix[ hitbox->m_bone ], max );
+	}
+	else
+	{
+		math::VectorTransform( math::VectorRotate( hitbox->m_mins, hitbox->m_angle ), matrix[ hitbox->m_bone ], min );
+		math::VectorTransform( math::VectorRotate( hitbox->m_maxs, hitbox->m_angle ), matrix[ hitbox->m_bone ], max );
+	}
+
+	rtn->hitboxID = ihitbox;
+	rtn->isOBB = !is_capsule;
+	rtn->radius = hitbox->m_radius;
+	rtn->mins = min;
+	rtn->maxs = max;
+	rtn->bone = hitbox->m_bone;
+}
+
+bool AimPlayer::CanSafepoint( LagComp::LagRecord_t* record, vec3_t aimpoint, int hitbox ) {
+
+	vec3_t Eyepos;
+	g_cl.m_local->EyePosition( &Eyepos );
+
+	vec3_t angle = math::CalcAngle( Eyepos, aimpoint );
+	vec3_t forward;
+	math::AngleVectors( { angle.x, angle.y, angle.z }, &forward );
+	auto end = Eyepos + forward * 8092.f;
+
+	C_Hitbox box1; CalculateHitboxData( &box1, record->m_pEntity, hitbox, record->left_matrix );
+	C_Hitbox box2; CalculateHitboxData( &box2, record->m_pEntity, hitbox, record->right_matrix );
+	C_Hitbox box3; CalculateHitboxData( &box3, record->m_pEntity, hitbox, record->center_matrix );
+
+	auto overlaps = box1.isOBB || box2.isOBB || box3.isOBB;
+
+	if ( overlaps ) {
+		math::VectorITransform( Eyepos, record->left_matrix[ box1.bone ], box1.mins );
+		math::VectorIRotate( end, record->left_matrix[ box1.bone ], box1.maxs );
+
+		math::VectorITransform( Eyepos, record->right_matrix[ box2.bone ], box2.mins );
+		math::VectorIRotate( end, record->right_matrix[ box2.bone ], box2.maxs );
+
+		math::VectorITransform( Eyepos, record->center_matrix[ box3.bone ], box3.mins );
+		math::VectorIRotate( end, record->center_matrix[ box3.bone ], box3.maxs );
+	}
+
+	auto hits = 0;
+
+	if ( overlaps ? math::IntersectBB( Eyepos, end, box1.mins, box1.maxs ) : math::Intersect( Eyepos, end, box1.mins, box1.maxs, box1.radius ) )
+		++hits;
+	if ( overlaps ? math::IntersectBB( Eyepos, end, box2.mins, box2.maxs ) : math::Intersect( Eyepos, end, box2.mins, box2.maxs, box2.radius ) )
+		++hits;
+	if ( overlaps ? math::IntersectBB( Eyepos, end, box3.mins, box3.maxs ) : math::Intersect( Eyepos, end, box3.mins, box3.maxs, box3.radius ) )
+		++hits;
+
+	return ( hits >= 3 );
+}
+
+void AimPlayer::SetupHitboxes( LagComp::LagRecord_t* record, bool history ) {
+	if ( !record )
+		return;
+
+	// reset hitboxes.
+	m_hitboxes.clear( );
+
+	if ( g_cl.m_weapon_id == ZEUS ) {
+		m_hitboxes.push_back( { HITBOX_BODY, HitscanMode::PREFER, false } );
+		return;
+	}
+
+	if ( g_csgo.m_cvar->FindVar( HASH( "mp_damage_headshot_only" ) )->GetInt( ) ) {
+		m_hitboxes.push_back( { HITBOX_HEAD, HitscanMode::PREFER, false } );
+		return;
+	}
+
+	bool override_hitbox = g_aimbot.m_override_hitboxes;
+
+	if ( override_hitbox ) {
+		if ( g_aimbot.m_overriden_hitboxes.head )
+			m_hitboxes.push_back( { HITBOX_HEAD, g_aimbot.m_priority_hitbox == 0 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_overriden_hitboxes.neck )
+			m_hitboxes.push_back( { HITBOX_NECK, g_aimbot.m_priority_hitbox == 1 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_overriden_hitboxes.upper_chest )
+			m_hitboxes.push_back( { HITBOX_UPPER_CHEST, g_aimbot.m_priority_hitbox == 2 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_overriden_hitboxes.body ) {
+			m_hitboxes.push_back( { HITBOX_THORAX, g_aimbot.m_priority_hitbox == 3 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_CHEST, g_aimbot.m_priority_hitbox == 3 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_overriden_hitboxes.stomach ) {
+			m_hitboxes.push_back( { HITBOX_PELVIS, g_aimbot.m_priority_hitbox == 4 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_BODY, g_aimbot.m_priority_hitbox == 4 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_overriden_hitboxes.legs ) {
+			m_hitboxes.push_back( { HITBOX_L_THIGH, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_THIGH, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_L_CALF, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_CALF, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_overriden_hitboxes.feet ) {
+			m_hitboxes.push_back( { HITBOX_L_FOOT, g_aimbot.m_priority_hitbox == 6 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_FOOT, g_aimbot.m_priority_hitbox == 6 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+	}
+	else {
+		if ( g_aimbot.m_body_in_air && !( record->m_fFlags & FL_ONGROUND ) && ( g_aimbot.m_overriden_hitboxes.upper_chest || g_aimbot.m_normal_hitboxes.body || g_aimbot.m_normal_hitboxes.stomach ) )
+			m_hitboxes.push_back( { HITBOX_BODY, HitscanMode::PREFER, false } );
+
+		if ( g_aimbot.m_body_on_crouch && record->m_flDuck == 1 && ( g_aimbot.m_overriden_hitboxes.upper_chest || g_aimbot.m_normal_hitboxes.body || g_aimbot.m_normal_hitboxes.stomach ) )
+			m_hitboxes.push_back( { HITBOX_BODY, HitscanMode::PREFER, false } );
+
+		if ( g_aimbot.m_body_lethal && ( g_aimbot.m_overriden_hitboxes.upper_chest || g_aimbot.m_normal_hitboxes.body || g_aimbot.m_normal_hitboxes.stomach ) )
+			m_hitboxes.push_back( { HITBOX_BODY, HitscanMode::LETHAL, false } );
+
+		if ( g_aimbot.m_body_lethal2 && ( g_aimbot.m_overriden_hitboxes.upper_chest || g_aimbot.m_normal_hitboxes.body || g_aimbot.m_normal_hitboxes.stomach ) )
+			m_hitboxes.push_back( { HITBOX_BODY, HitscanMode::LETHAL2, false } );
+
+		if ( g_aimbot.m_normal_hitboxes.head )
+			m_hitboxes.push_back( { HITBOX_HEAD, g_aimbot.m_priority_hitbox == 0 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_normal_hitboxes.neck )
+			m_hitboxes.push_back( { HITBOX_NECK, g_aimbot.m_priority_hitbox == 1 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_normal_hitboxes.upper_chest )
+			m_hitboxes.push_back( { HITBOX_UPPER_CHEST, g_aimbot.m_priority_hitbox == 2 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+
+		if ( g_aimbot.m_normal_hitboxes.body ) {
+			m_hitboxes.push_back( { HITBOX_THORAX, g_aimbot.m_priority_hitbox == 3 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_CHEST, g_aimbot.m_priority_hitbox == 3 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_normal_hitboxes.stomach ) {
+			m_hitboxes.push_back( { HITBOX_PELVIS, g_aimbot.m_priority_hitbox == 4 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_BODY, g_aimbot.m_priority_hitbox == 4 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_normal_hitboxes.legs ) {
+			m_hitboxes.push_back( { HITBOX_L_THIGH, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_THIGH, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_L_CALF, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_CALF, g_aimbot.m_priority_hitbox == 5 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+
+		if ( g_aimbot.m_normal_hitboxes.feet ) {
+			m_hitboxes.push_back( { HITBOX_L_FOOT, g_aimbot.m_priority_hitbox == 6 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+			m_hitboxes.push_back( { HITBOX_R_FOOT, g_aimbot.m_priority_hitbox == 6 ? HitscanMode::PREFER : HitscanMode::NORMAL, false } );
+		}
+	}
+}
+
+void Aimbot::init( ) {
+	// clear old targets.
+	m_targets.clear( );
+	m_sorted_targets.clear( );
+
+	m_target = nullptr;
+	m_aim = vec3_t{ };
+	m_angle = ang_t{ };
+	m_damage = 0.f;
+	m_record = nullptr;
+	m_stop = true;
+	m_hitbox = -1;
+	m_did_stop = true;
+
+	m_best_dist = std::numeric_limits< float >::max( );
+	m_best_fov = 180.f + 1.f;
+	m_best_damage = 0.f;
+	g_aimbot.m_current_matrix = nullptr;
+
+	if ( !g_tickbase.m_shift_data.m_did_shift_before && !g_tickbase.m_shift_data.m_should_be_ready )
+		m_shoot_next_tick = false;
+
+	m_current_sphere.clear( );
+}
+
+void Aimbot::StripAttack( ) {
+	if ( g_cl.m_weapon_id == REVOLVER )
+		return;
+	else
+		g_cl.m_cmd->m_buttons &= ~IN_ATTACK;
+}
+
+void Aimbot::think( ) {
+
+	// update config values.
+	update_config( );
+
+	// do all startup routines.
+	init( );
+
+	if ( !g_aimbot.m_enable )
+		return;
+
+	// sanity.
+	if ( !g_cl.m_weapon )
+		return;
+
+	// no grenades or bomb.
+	if ( g_cl.m_weapon->IsGrenade( ) || g_cl.m_weapon_type == WEAPONTYPE_EQUIPMENT )
+		return;
+
+	if ( !g_cl.m_weapon_fire )
+		StripAttack( );
+
+	// animation silent aim, prevent the ticks with the shot in it to become the tick that gets processed.
+	// we can do this by always choking t he tick before we are able to shoot.
+	bool revolver = g_cl.m_weapon_id == REVOLVER && g_cl.m_revolver_cock != 0;
+
+	// one tick before being able to shoot.
+	if ( revolver && g_cl.m_revolver_cock > 0 && g_cl.m_revolver_cock == g_cl.m_revolver_query )
+		return;
+
+	// setup bones for all valid targets.
+	for ( int i{ 1 }; i <= g_csgo.m_globals->m_max_clients; ++i ) {
+		Player* player = g_csgo.m_entlist->GetClientEntity< Player* >( i );
+
+		if ( !player || player == g_cl.m_local )
+			continue;
+
+		if ( !IsValidTarget( player ) )
+			continue;
+
+		AimPlayer* data = &m_players[ i - 1 ];
+		if ( !data )
+			continue;
+
+		m_targets.push_back( data );
+	}
+
+	// run knifebot.
+	if ( g_cl.m_weapon_type == WEAPONTYPE_KNIFE && g_cl.m_weapon_id != ZEUS ) {
+		knife( );
+		return;
+	}
+
+	// scan available targets... if we even have any.
+	test_parallel_t parallel;
+	//ParallelProcess( &parallel, 1, &Aimbot::find );
+	find( parallel );
+
+	// finally set data when shooting.
+	apply( );
+}
+
+bool Aimbot::AdjustVelocity(  ) { // temporary
+
+	bool reload;
+	auto v23 = g_cl.m_local->get<uintptr_t>( g_csgo.AnimOverlay );
+	auto v73 = *( __m128* )( v23 + 0x58 );
+
+	if ( !( g_cl.m_local->m_fFlags( ) & FL_ONGROUND ) && !m_in_air )
+		return true;
+
+	if ( g_movement.m_slow_motion )
+		return true;
+
+	auto v52 = _mm_shuffle_ps( v73, v73, 170 ).m128_f32[ 3 ] >= 0.55f ? 1.0f : v73.m128_f32[ 3 ];
+	if ( v52 < 0.99f )
+		return false;
+
+	if( !m_target )
+		return false;
+
+	if( !m_between_shots && !g_cl.m_weapon_fire )
+		return false;
+
+	float v4 = 0.33000001 * ( g_cl.m_local->m_bIsScoped( ) ? g_cl.m_weapon_info->flMaxPlayerSpeedAlt : g_cl.m_weapon_info->flMaxPlayerSpeed );
+
+	if ( g_inputpred.PredictionData.m_vecUnpredictedVelocity.length_2d( ) < v4 ) {
+
+		float squirt2 = std::sqrtf( ( g_cl.m_cmd->m_forward_move * g_cl.m_cmd->m_forward_move ) + ( g_cl.m_cmd->m_side_move * g_cl.m_cmd->m_side_move ) );
+
+		float cock1 = g_cl.m_cmd->m_forward_move / squirt2;
+		float cock2 = g_cl.m_cmd->m_side_move / squirt2;
+
+		auto Velocity = g_cl.m_local->m_vecVelocity( ).length_2d( );
+
+		if ( v4 + 1.0 <= Velocity ) {
+			g_cl.m_cmd->m_forward_move = 0;
+			g_cl.m_cmd->m_side_move = 0;
+		}
+		else {
+			g_cl.m_cmd->m_forward_move = cock1 * v4;
+			g_cl.m_cmd->m_side_move = cock2 * v4;
+		}
+	}
+	else
+	{
+		ang_t angle;
+		math::VectorAngles( g_cl.m_local->m_vecVelocity( ), angle );
+
+		float speed = g_cl.m_local->m_vecVelocity( ).length( );
+
+		angle.y = g_cl.m_view_angles.y - angle.y;
+
+		vec3_t direction;
+		math::AngleVectors( angle, &direction );
+
+		vec3_t stop = direction * -speed;
+
+		g_cl.m_cmd->m_forward_move = stop.x;
+		g_cl.m_cmd->m_side_move = stop.y;
+
+		// onetap
+		if ( m_force_accuracy )
+			return false;
+	}
+
+	return true;
+}
+
+void Aimbot::find( test_parallel_t& data ) {
+	struct BestTarget_t { Player* player; AimPlayer* target; vec3_t pos; float damage; float min_damage; LagComp::LagRecord_t* record; int hitbox; };
+
+	vec3_t       tmp_pos;
+	float        tmp_damage{ };
+	float		 tmp_min_damage;
+	BestTarget_t best;
+	best.player = nullptr;
+	best.target = nullptr;
+	best.damage = -1.f;
+	best.pos = vec3_t{ };
+	best.record = nullptr;
+	best.hitbox = -1;
+
+	if ( g_aimbot.m_targets.empty( ) )
+		return;
+
+	// iterate all targets.
+	for ( const auto& t : g_aimbot.m_targets ) {
+		if ( !t->m_player )
+			continue;
+
+		if ( g_lagcompensation.BreakingLagCompensation( t->m_player ) && g_cfg[ XOR( "aimbot_fix_lag" ) ].get< bool >( ) ) {
+			const auto first = g_lagcompensation.GetLatestRecord( t->m_player );
+
+			t->SetupHitboxes( first.value( ), false );
+			if ( t->m_hitboxes.empty( ) )
+				continue;
+
+			// rip something went wrong..
+			if ( t->GetBestAimPosition( tmp_pos, tmp_damage, best.hitbox, first.value( ), tmp_min_damage ) && g_aimbot.SortTargets( first.value( ), tmp_pos, tmp_damage ) ) {
+
+				// if we made it so far, set shit.
+				best.player = t->m_player;
+				best.pos = tmp_pos;
+				best.damage = tmp_damage;
+				best.min_damage = tmp_min_damage;
+				best.record = first.value( );
+			}
+		}
+		else {
+			const auto ideal = g_lagcompensation.GetLatestRecord( t->m_player );
+			if ( !ideal.has_value( ) || ideal.value( )->m_bDormant || ( ideal.value( )->m_pEntity && ideal.value( )->m_pEntity->m_bGunGameImmunity( ) ) )
+				continue;
+
+			t->SetupHitboxes( ideal.value( ), false );
+			if ( t->m_hitboxes.empty( ) )
+				continue;
+
+			// try to select best record as target.
+			if ( t->GetBestAimPosition( tmp_pos, tmp_damage, best.hitbox, ideal.value( ), tmp_min_damage ) ) {
+				if ( g_aimbot.SortTargets( ideal.value( ), tmp_pos, tmp_damage ) ) {
+					// if we made it so far, set shit. 
+					best.player = t->m_player;
+					best.pos = tmp_pos;
+					best.damage = tmp_damage;
+					best.record = ideal.value( );
+					best.min_damage = tmp_min_damage;
+					best.target = t;
+				}
+			}
+
+			const auto last = g_lagcompensation.GetOldestRecord( t->m_player );
+			if ( !last.has_value( ) || last.value( ) == ideal.value( ) || last.value( )->m_bDormant || ( last.value( )->m_pEntity && last.value( )->m_pEntity->m_bGunGameImmunity( ) ) )
+				continue;
+
+			t->SetupHitboxes( last.value( ), true );
+			if ( t->m_hitboxes.empty( ) )
+				continue;
+
+			// rip something went wrong..
+			// try to select best record as target.
+			if ( t->GetBestAimPosition( tmp_pos, tmp_damage, best.hitbox, ideal.value( ), tmp_min_damage ) ) {
+				// if we made it so far, set shit. 
+				best.player = t->m_player;
+				best.pos = tmp_pos;
+				best.damage = tmp_damage;
+				best.record = ideal.value( );
+				best.min_damage = tmp_min_damage;
+				best.target = t;
+			}
+
+			// we found a target we can shoot at and deal damage? fuck yeah. (THIS IS TEMPORARY TILL WE REPLACE THE TARGET SELECTION)
+			if ( best.damage > 0.f && best.player && best.record )
+				break;
+		}
+	}
+
+	// verify our target and set needed data.
+	if ( best.player && best.record && best.target ) {
+		// calculate aim angle.
+		math::VectorAngles( best.pos - g_cl.m_shoot_pos, g_aimbot.m_angle );
+
+		// set member vars.
+		g_aimbot.m_target = best.player;
+		g_aimbot.m_aim = best.pos;
+		g_aimbot.m_damage = best.damage;
+		g_aimbot.m_record = best.record;
+		g_aimbot.m_hitbox = best.hitbox;
+
+		g_aimbot.m_current_matrix = best.record->m_pMatrix;
+
+		if ( best.target != g_aimbot.m_old_target ) {
+			g_aimbot.m_shoot_next_tick = false;
+		}
+
+		if ( !g_aimbot.AdjustVelocity( ) )
+			return;
+
+		if ( g_aimbot.m_duck && !( !( g_cl.m_local->m_fFlags( ) & FL_ONGROUND ) && !g_aimbot.m_in_air ))
+			g_cl.m_cmd->m_buttons |= IN_DUCK;
+
+		if ( !g_cl.m_weapon_fire )
+			return;
+
+		bool on = true;
+		bool hit = ( !g_cl.m_ground && g_cl.m_weapon && g_cl.m_weapon_id == SSG08 && g_cfg[ XOR( "aimbot_jumpscout" ) ].get< bool >( ) && g_cl.m_weapon->GetInaccuracy( ) < 0.009f ) || ( on && g_aimbot.CheckHitchance( g_aimbot.m_target, g_aimbot.m_angle, g_aimbot.m_record, best.hitbox ) );
+
+		// if we can scope.
+		bool can_scope = g_cl.m_weapon && g_cl.m_weapon->m_zoomLevel( ) == 0 && g_cl.m_weapon->IsZoomable( true );
+
+		if ( can_scope ) {
+			// always.
+			if ( g_aimbot.m_autoscope ) {
+				g_aimbot.m_attack2 = true;
+				return;
+			} 
+		}
+
+		if ( hit || !on ) {
+
+			// these conditions are so cancer
+			if ( !g_tickbase.m_shift_data.m_should_attempt_shift || ( ( ( g_cl.m_goal_shift == ( g_cl.m_max_lag - ( 14 - g_cfg[ XOR( "aimbot_exploits_teleport_ticks" ) ].get< int >( ) ) ) ) || g_tickbase.m_shift_data.m_should_disable ) && g_tickbase.m_shift_data.m_should_attempt_shift ) || ( g_cl.m_goal_shift == (g_cl.m_max_lag / 2) && g_tickbase.m_shift_data.m_should_attempt_shift && !( g_tickbase.m_shift_data.m_prepare_recharge || g_tickbase.m_shift_data.m_did_shift_before && !g_tickbase.m_shift_data.m_should_be_ready ) ) ) {
+				if ( g_cfg[ XOR( "aimbot_autofire" ) ].get< bool >( ) ) {
+
+					// left click attack.
+					g_aimbot.m_attack = true;
+
+					// save our target for later
+					g_aimbot.m_old_target = best.target;
+				}
+			}
+		}
+	}
+}
+
+bool Aimbot::CheckHitchance( Player* player, const ang_t& angle, LagComp::LagRecord_t* record, int hitbox ) {
+	constexpr float HITCHANCE_MAX = 100.f;
+	constexpr int   SEED_MAX = 255;
+
+	vec3_t     start{ g_cl.m_shoot_pos }, end, fwd, right, up, dir, wep_spread;
+	float      inaccuracy, spread;
+	CGameTrace tr;
+	size_t     total_hits{ }, needed_hits{ ( size_t )std::ceil( ( m_minimum_hitchance * SEED_MAX ) / HITCHANCE_MAX ) };
+
+	if ( g_csgo.m_cvar->FindVar( HASH( "weapon_accuracy_nospread" ) )->GetInt( ) )
+		return true;
+
+	// get needed directional vectors.
+	math::AngleVectors( angle, &fwd, &right, &up );
+
+	// store off inaccuracy / spread ( these functions are quite intensive and we only need them once ).
+	inaccuracy = g_cl.m_weapon->GetInaccuracy( );
+	spread = g_cl.m_weapon->GetSpread( );
+
+	// iterate all possible seeds.
+	for ( int i{ }; i <= SEED_MAX; ++i ) {
+		// get spread.
+		wep_spread = g_cl.m_weapon->CalculateSpread( i, inaccuracy, spread );
+
+		// get spread direction.
+		dir = ( fwd + ( right * wep_spread.x ) + ( up * wep_spread.y ) ).normalized( );
+
+		// get end of trace.
+		end = start + ( dir * g_cl.m_weapon_info->flRange );
+
+		// setup ray and trace.
+		g_csgo.m_engine_trace->ClipRayToEntity( Ray( start, end ), MASK_SHOT, player, &tr );
+
+		// check if we hit a valid player / hitgroup on the player and increment total hits.
+		if ( tr.m_entity == player && game::IsValidHitgroup( tr.m_hitgroup ) )
+			++total_hits;
+
+		// we made it.
+		if ( total_hits >= needed_hits )
+			return true;
+
+		// we cant make it anymore.
+		if ( ( SEED_MAX - i + total_hits ) < needed_hits )
+			return false;
+	}
+
+	return false;
+}
+
+bool AimPlayer::SetupHitboxPoints( LagComp::LagRecord_t* record, BoneArray* bones, int index, std::vector< vec3_t >& points ) {
+	// reset points.
+	points.clear( );
+
+	const model_t* model = record->m_pEntity->GetModel( );
+	if ( !model )
+		return false;
+
+	studiohdr_t* hdr = g_csgo.m_model_info->GetStudioModel( model );
+	if ( !hdr )
+		return false;
+
+	mstudiohitboxset_t* set = hdr->GetHitboxSet( record->m_pEntity->m_nHitboxSet( ) );
+	if ( !set )
+		return false;
+
+	mstudiobbox_t* bbox = set->GetHitbox( index );
+	if ( !bbox )
+		return false;
+
+
+	// get hitbox scales.
+	float scale = g_aimbot.m_headscale * 0.01;
+
+	// big inair fix.
+	if ( !( record->m_fFlags  & FL_ONGROUND ) )
+		scale = 0.7f;
+
+	float bscale = g_aimbot.m_bodyscale * 0.01;
+
+	// calculate dynamic scale
+	auto transformed_center = ( bbox->m_mins + bbox->m_maxs ) * 0.5f;
+	math::VectorITransform( transformed_center, m_matrix[ bbox->m_bone ], transformed_center );
+
+	auto spread = g_cl.m_weapon->GetSpread( ) + g_cl.m_weapon->GetInaccuracy( );
+	auto distance = transformed_center.dist_to( g_cl.m_shoot_pos );
+
+	distance /= sin( math::deg_to_rad( 90.0f - math::rad_to_deg( spread ) ) );
+	spread = sin( spread );
+
+	// get radius and set spread.
+	auto radius = std::max( bbox->m_radius - distance * spread, 0.0f );
+	scale = bscale = std::clamp( radius / bbox->m_radius, 0.0f, 1.0f );
+
+	// these indexes represent boxes.
+	if ( bbox->m_radius <= 0.f ) {
+		// references: 
+		//      https://developer.valvesoftware.com/wiki/Rotation_Tutorial
+		//      CBaseAnimating::GetHitboxBonePosition
+		//      CBaseAnimating::DrawServerHitboxes
+
+		// convert rotation angle to a matrix.
+		matrix3x4_t rot_matrix;
+		g_csgo.AngleMatrix( bbox->m_angle, rot_matrix );
+
+		// apply the rotation to the entity input space (local).
+		matrix3x4_t matrix;
+		math::ConcatTransforms( bones[ bbox->m_bone ], rot_matrix, matrix );
+
+		// extract origin from matrix.
+		vec3_t origin = matrix.GetOrigin( );
+
+		// compute raw center point.
+		vec3_t center = ( bbox->m_mins + bbox->m_maxs ) / 2.f;
+
+		// the feet hiboxes have a side, heel and the toe.
+		if ( index == HITBOX_R_FOOT || index == HITBOX_L_FOOT ) {
+			float d1 = ( bbox->m_mins.z - center.z ) * 0.875f;
+
+			// invert.
+			if ( index == HITBOX_L_FOOT )
+				d1 *= -1.f;
+
+			// side is more optimal then center.
+			points.push_back( { center.x, center.y, center.z + d1 } );
+
+			if ( g_aimbot.m_multipoint_hitboxes.feet ) {
+				// get point offset relative to center point
+				// and factor in hitbox scale.
+				float d2 = ( bbox->m_mins.x - center.x ) * scale;
+				float d3 = ( bbox->m_maxs.x - center.x ) * scale;
+
+				// heel.
+				points.push_back( { center.x + d2, center.y, center.z } );
+
+				// toe.
+				points.push_back( { center.x + d3, center.y, center.z } );
+			}
+		}
+
+		// nothing to do here we are done.
+		if ( points.empty( ) )
+			return false;
+
+		// rotate our bbox points by their correct angle
+		// and convert our points to world space.
+		for ( auto& p : points ) {
+			// VectorRotate.
+			// rotate point by angle stored in matrix.
+			p = { p.dot( matrix[ 0 ] ), p.dot( matrix[ 1 ] ), p.dot( matrix[ 2 ] ) };
+
+			// transform point to world space.
+			p += origin;
+		}
+	}
+
+	// these hitboxes are capsules.
+	else {
+		// factor in the pointscale.
+		float r = bbox->m_radius * scale;
+		float br = bbox->m_radius * bscale;
+
+		// compute raw center point.
+		vec3_t center = ( bbox->m_mins + bbox->m_maxs ) / 2.f;
+
+		// head has 5 points.
+		if ( index == HITBOX_HEAD ) {
+			// add center.
+			points.push_back( center );
+
+			if ( g_aimbot.m_multipoint_hitboxes.head ) {
+				// rotation matrix 45 degrees.
+				// https://math.stackexchange.com/questions/383321/rotating-x-y-points-45-degrees
+				// std::cos( deg_to_rad( 45.f ) )
+				constexpr float rotation = 0.70710678f;
+
+				// top/back 45 deg.
+				// this is the best spot to shoot at.
+				points.push_back( { bbox->m_maxs.x + ( rotation * r ), bbox->m_maxs.y + ( -rotation * r ), bbox->m_maxs.z } );
+
+				vec3_t right{ bbox->m_maxs.x, bbox->m_maxs.y, bbox->m_maxs.z + r };
+
+				// right.
+				points.push_back( right );
+
+				vec3_t left{ bbox->m_maxs.x, bbox->m_maxs.y, bbox->m_maxs.z - r };
+
+				// left.
+				points.push_back( left );
+
+				// back.
+				points.push_back( { bbox->m_maxs.x, bbox->m_maxs.y - r, bbox->m_maxs.z } );
+
+				// get animstate ptr.
+				CCSGOPlayerAnimState* state = record->m_pEntity->m_PlayerAnimState( );
+
+				// add this point only under really specific circumstances.
+				// if we are standing still and have the lowest possible pitch pose.
+				if ( state && record->m_vecVelocity.length( ) <= 0.1f && record->m_angEyeAngles.x <= state->body_pitch ) {
+
+					// bottom point.
+					points.push_back( { bbox->m_maxs.x - r, bbox->m_maxs.y, bbox->m_maxs.z } );
+				}
+			}
+		}
+
+		// body has 5 points.
+		else if ( index == HITBOX_BODY ) {
+			// center.
+			points.push_back( center );
+
+			// back.
+			if ( g_aimbot.m_multipoint_hitboxes.stomach )
+				points.push_back( { center.x, bbox->m_maxs.y - br, center.z } );
+		}
+
+		else if ( index == HITBOX_PELVIS ) {
+			// back.
+			if ( g_aimbot.m_multipoint_hitboxes.stomach )
+				points.push_back( { center.x, bbox->m_maxs.y - br, center.z } );
+		}
+		else if ( index == HITBOX_UPPER_CHEST ) {
+			// back.
+			if ( g_aimbot.m_multipoint_hitboxes.upper_chest )
+				points.push_back( { center.x, bbox->m_maxs.y - br, center.z } );
+		}
+		// other stomach/chest hitboxes have 2 points.
+		else if ( index == HITBOX_THORAX || index == HITBOX_CHEST ) {
+			// add center.
+			points.push_back( center );
+
+			// add extra point on back.
+			if ( g_aimbot.m_multipoint_hitboxes.body )
+				points.push_back( { center.x, bbox->m_maxs.y - br, center.z } );
+		}
+
+		else if ( index == HITBOX_R_CALF || index == HITBOX_L_CALF ) {
+			// add center.
+			points.push_back( center );
+
+			// half bottom.
+			if ( g_aimbot.m_multipoint_hitboxes.legs )
+				points.push_back( { bbox->m_maxs.x - ( bbox->m_radius / 2.f ), bbox->m_maxs.y, bbox->m_maxs.z } );
+		}
+
+		else if ( index == HITBOX_R_THIGH || index == HITBOX_L_THIGH ) {
+			// add center.
+			if ( g_aimbot.m_multipoint_hitboxes.feet ) //should be legs but uh....
+				points.push_back( center );
+		}
+
+		// arms get only one point.
+		else if ( false && (index == HITBOX_R_UPPER_ARM || index == HITBOX_L_UPPER_ARM) ) { //ignore arms
+			// elbow.
+			points.push_back( { bbox->m_maxs.x + bbox->m_radius, center.y, center.z } );
+		}
+
+		// nothing left to do here.
+		if ( points.empty( ) )
+			return false;
+
+		// transform capsule points.
+		for ( auto& p : points )
+			math::VectorTransform( p, bones[ bbox->m_bone ], p );
+	}
+
+	return true;
+}
+
+bool AimPlayer::GetBestAimPosition( vec3_t& aim, float& damage, int& hitbox, LagComp::LagRecord_t* record, float& tmp_min_damage ) {
+	bool                  done, pen;
+	float                 dmg, pendmg;
+	HitscanData_t         scan;
+	std::vector< vec3_t > points;
+	CGameTrace            trace;
+
+	// get player hp.
+	int hp = m_player->m_iHealth( );
+
+	m_matrix = record->m_pMatrix;
+
+	if ( !m_matrix )
+		return false;
+
+	if ( g_cl.m_weapon_id == ZEUS ) {
+		dmg = pendmg = hp;
+		pen = true;
+	}
+
+	else {
+		dmg = g_aimbot.m_override_damage ? g_aimbot.m_overriden_damage : g_aimbot.m_minimum_damage;
+
+		if( dmg > hp )
+			dmg = hp;
+
+		pendmg = g_aimbot.m_override_damage ? g_aimbot.m_overriden_damage : g_aimbot.m_minimum_penetration_damage;
+
+		if ( pendmg > hp )
+			pendmg = hp;
+
+		pen = true;
+	}
+
+	// backup player
+	const auto backup_origin = record->m_pEntity->m_vecOrigin( );
+	const auto backup_abs_origin = record->m_pEntity->GetAbsOrigin( );
+	const auto backup_abs_angles = record->m_pEntity->GetAbsAngles( );
+	const auto backup_obb_mins = record->m_pEntity->m_vecMins( );
+	const auto backup_obb_maxs = record->m_pEntity->m_vecMaxs( );
+	const auto backup_cache = record->m_pEntity->m_BoneCache2( );
+
+
+	// write all data of this record l0l.
+	auto restore = [ & ]( ) -> void {
+		record->m_pEntity->m_vecOrigin( ) = backup_origin;
+		record->m_pEntity->SetAbsOrigin( backup_abs_origin );
+		record->m_pEntity->SetAbsAngles( backup_abs_angles );
+		record->m_pEntity->m_vecMins( ) = backup_obb_mins;
+		record->m_pEntity->m_vecMaxs( ) = backup_obb_maxs;
+		record->m_pEntity->m_BoneCache2( ) = backup_cache;
+	};
+
+
+	// iterate hitboxes.
+	for ( const auto& it : m_hitboxes ) {
+		done = false;
+
+		// setup points on hitbox.
+		if ( !SetupHitboxPoints( record, m_matrix, it.m_index, points ) )
+			continue;
+
+		// iterate points on hitbox.
+		for ( const auto& point : points ) {
+			penetration::PenetrationInput_t in;
+
+			in.m_damage = dmg;
+			in.m_damage_pen = pendmg;
+			in.m_can_pen = pen;
+			in.m_target = m_player;
+			in.m_from = g_cl.m_local;
+			in.m_pos = point;
+
+			// ignore mindmg.
+			if ( it.m_mode == HitscanMode::LETHAL || it.m_mode == HitscanMode::LETHAL2 )
+				in.m_damage = in.m_damage_pen = 1.f;
+
+			penetration::PenetrationOutput_t out;
+
+			//bool safe = /*g_aimbot.CanHit( g_cl.m_shoot_pos, point, record, it.m_index, true, record->m_pMatrix );*/ CanSafepoint( record, point, it.m_index );
+
+			//if ( !safe && g_aimbot.m_force_safepoint )
+			//	continue;
+
+			// we can hit p!
+			if ( penetration::run( &in, &out ) ) {
+
+				// nope we did not hit head..
+				if ( it.m_index == HITBOX_HEAD && out.m_hitgroup != HITGROUP_HEAD )
+					continue;
+
+				// prefered hitbox, just stop now.
+				if ( it.m_mode == HitscanMode::PREFER )
+					done = true;
+
+				// this hitbox requires lethality to get selected, if that is the case.
+				// we are done, stop now.
+				else if ( it.m_mode == HitscanMode::LETHAL && out.m_damage >= m_player->m_iHealth( ) )
+					done = true;
+
+				// 2 shots will be sufficient to kill.
+				else if ( it.m_mode == HitscanMode::LETHAL2 && ( out.m_damage * 2.f ) >= m_player->m_iHealth( ) )
+					done = true;
+
+				// this hitbox has normal selection, it needs to have more damage.
+				else if ( it.m_mode == HitscanMode::NORMAL ) {
+					// we did more damage.
+					if ( out.m_damage > scan.m_damage ) {
+						// save new best data.
+						scan.m_damage = out.m_damage;
+						scan.m_pos = point;
+					}
+				}
+
+				// we found a preferred / lethal hitbox.
+				if ( done ) {
+					// save new best data.
+					scan.m_damage = out.m_damage;
+					scan.m_pos = point;
+					break;
+				}
+			}
+		}
+
+		// ghetto break out of outer loop.
+		if ( done )
+			break;
+	}
+
+	// we found something that we can damage.
+	// set out vars.
+	if ( scan.m_damage > 0.f ) {
+		aim = scan.m_pos;
+		damage = scan.m_damage;
+		return true;
+	}
+
+	return false;
+}
+
+bool AimPlayer::SafePointMultiPoint( LagComp::LagRecord_t* record, BoneArray* bones, int index, std::vector< vec3_t >& points ) {
+
+	// reset points.
+	points.clear( );
+
+	if ( index > 19 ) {
+		return false;
+	}
+
+	const model_t* model = record->m_pEntity->GetModel( );
+	if ( !model )
+		return false;
+
+	studiohdr_t* hdr = g_csgo.m_model_info->GetStudioModel( model );
+	if ( !hdr )
+		return false;
+
+	mstudiohitboxset_t* set = hdr->GetHitboxSet( record->m_pEntity->m_nHitboxSet( ) );
+	if ( !set )
+		return false;
+
+	mstudiobbox_t* bbox = set->GetHitbox( index );
+	if ( !bbox )
+		return false;
+
+	auto bonecache = record->m_pEntity->m_BoneCache( );
+
+	auto m_flRadius = bbox->m_radius;
+	if ( m_flRadius == -1.0f ) {
+		matrix3x4_t rotated_matrix;
+		g_csgo.AngleMatrix( bbox->m_angle, rotated_matrix );
+
+		matrix3x4_t matrix;
+		math::ConcatTransforms( bonecache.m_pCachedBones[ bbox->m_bone ], rotated_matrix, matrix );
+
+		points.push_back( bonecache.m_pCachedBones[ bbox->m_bone ].GetOrigin( ) + bbox->m_mins );
+		points.push_back( bonecache.m_pCachedBones[ bbox->m_bone ].GetOrigin( ) + bbox->m_maxs );
+		points.push_back( bonecache.m_pCachedBones[ bbox->m_bone ].GetOrigin( ) );
+	}
+	else {
+		matrix3x4_t rotated_matrix;
+		g_csgo.AngleMatrix( bbox->m_angle, rotated_matrix );
+
+		auto v25 = bbox->m_mins;
+		auto v28 = ( ( rotated_matrix.m_flMatVal[ 0 ][ 0 ] * v25.x ) + ( rotated_matrix.m_flMatVal[ 0 ][ 1 ] * v25.y ) + ( rotated_matrix.m_flMatVal[ 0 ][ 2 ] * v25.z ) );
+		auto v29 = ( ( rotated_matrix.m_flMatVal[ 1 ][ 0 ] * v25.x ) + ( rotated_matrix.m_flMatVal[ 1 ][ 1 ] * v25.y ) + ( rotated_matrix.m_flMatVal[ 1 ][ 2 ] * v25.z ) );
+		auto v30 = ( ( rotated_matrix.m_flMatVal[ 2 ][ 0 ] * v25.x ) + ( rotated_matrix.m_flMatVal[ 2 ][ 1 ] * v25.y ) + ( rotated_matrix.m_flMatVal[ 2 ][ 2 ] * v25.z ) );
+
+		g_csgo.AngleMatrix( bbox->m_angle, rotated_matrix );
+		auto v31 = bbox->m_maxs;
+		auto v34 = ( ( rotated_matrix.m_flMatVal[ 0 ][ 0 ] * v31.x ) + ( rotated_matrix.m_flMatVal[ 0 ][ 1 ] * v31.y ) + ( rotated_matrix.m_flMatVal[ 0 ][ 2 ] * v31.z ) );
+		auto v35 = ( ( rotated_matrix.m_flMatVal[ 1 ][ 0 ] * v31.x ) + ( rotated_matrix.m_flMatVal[ 1 ][ 1 ] * v31.y ) + ( rotated_matrix.m_flMatVal[ 1 ][ 2 ] * v31.z ) );
+		auto v36 = ( ( rotated_matrix.m_flMatVal[ 2 ][ 0 ] * v31.x ) + ( rotated_matrix.m_flMatVal[ 2 ][ 1 ] * v31.y ) + ( rotated_matrix.m_flMatVal[ 2 ][ 2 ] * v31.z ) );
+
+		float* v37 = ( float* )( ( DWORD )bonecache.m_pCachedBones + 48 * bbox->m_bone );
+
+		vec3_t some_point1;
+		some_point1.x = ( ( ( v37[ 1 ] * v29 ) + ( v37[ 0 ] * v28 ) ) + ( v37[ 2 ] * v30 ) ) + v37[ 3 ];
+		some_point1.y = ( ( ( v37[ 5 ] * v29 ) + ( v28 * v37[ 4 ] ) ) + ( v37[ 6 ] * v30 ) ) + v37[ 7 ];
+		some_point1.z = ( ( ( v37[ 9 ] * v29 ) + ( v28 * v37[ 8 ] ) ) + ( v37[ 10 ] * v30 ) ) + v37[ 11 ];
+
+		float* v38 = ( float* )( ( DWORD )bonecache.m_pCachedBones + 48 * bbox->m_bone );
+
+		vec3_t some_point2;
+		some_point2.x = ( ( ( v38[ 1 ] * v35 ) + ( v34 * v38[ 0 ] ) ) + ( v38[ 2 ] * v36 ) ) + v38[ 3 ];
+		some_point2.y = ( ( ( v38[ 5 ] * v35 ) + ( v34 * v38[ 4 ] ) ) + ( v38[ 6 ] * v36 ) ) + v38[ 7 ];
+		some_point2.z = ( ( ( v38[ 9 ] * v35 ) + ( v34 * v38[ 8 ] ) ) + ( v38[ 10 ] * v36 ) ) + v38[ 11 ];
+
+		auto v39 = 6 * bbox->m_bone;
+
+		float* v40 = ( float* )( ( DWORD )bonecache.m_pCachedBones + 48 * bbox->m_bone );
+
+		vec3_t some_point3;
+		some_point3.x = *( float* )( ( DWORD )bonecache.m_pCachedBones + 48 * bbox->m_bone ) + v40[ 3 ];
+		some_point3.y = *( float* )( ( DWORD )bonecache.m_pCachedBones + 8 * v39 + 16 ) + v40[ 7 ];
+		some_point3.z = *( float* )( ( DWORD )bonecache.m_pCachedBones + 8 * v39 + 32 ) + v40[ 11 ];
+
+		points.push_back( some_point3 );
+		points.push_back( some_point2 );
+		points.push_back( some_point1 );
+	}
+
+	return true;
+}
+
+bool Aimbot::SortTargets( LagComp::LagRecord_t* record, const vec3_t& aim, float damage ) {
+	float dist, fov;
+
+	switch ( g_cfg[ XOR( "aimbot_target_selection" ) ].get<int>( ) ) {
+
+		// crosshair.
+		case 0:
+			fov = math::GetFOV( g_cl.m_view_angles, g_cl.m_shoot_pos, aim );
+
+			if ( fov < m_best_fov ) {
+				m_best_fov = fov;
+				return true;
+			}
+
+			break;
+
+		// distance.
+		case 1:
+			dist = g_cl.m_shoot_pos.dist_to( record->m_vecOrigin );
+
+			if ( dist < m_best_dist ) {
+				m_best_dist = dist;
+				return true;
+			}
+
+			break;
+
+		// damage.
+		case 2:
+			if ( damage > m_best_damage ) {
+				m_best_damage = damage;
+				return true;
+			}
+
+			break;
+
+		default:
+			return false;
+	}
+
+	return false;
+}
+
+void Aimbot::apply( ) {
+	bool attack, attack2;
+
+	// attack states.
+	attack = m_attack;
+	attack2 = m_attack2;
+
+	m_attack = m_attack2 = false;
+
+	if ( attack )
+		g_cl.m_cmd->m_buttons |= IN_ATTACK;
+	else if ( attack2 )
+		g_cl.m_cmd->m_buttons |= IN_ATTACK2;
+
+	// if not silent aim, apply the viewangles.
+	if ( m_target ) {
+		if ( !g_cfg[ XOR( "aimbot_silent" ) ].get<bool>( ) )
+			g_csgo.m_engine->SetViewAngles( m_angle );
+	}
+
+	// ensure we're attacking.
+	if ( attack || attack2 ) {
+
+		if ( m_shoot_next_tick )
+			m_shoot_next_tick = false;
+
+		if ( m_target ) {
+			// make sure to aim at un-interpolated data.
+			// do this so BacktrackEntity selects the exact record.
+			if ( m_record && !g_lagcompensation.BreakingLagCompensation( m_target ) || m_record && !g_cfg[ XOR( "aimbot_fix_lag" ) ].get< bool >( ) ) {
+				g_cl.m_cmd->m_tick = game::TIME_TO_TICKS( m_record->m_flSimulationTime + g_cl.m_lerp );
+			}
+
+			// set angles to target.
+			g_cl.m_cmd->m_view_angles = m_angle;
+
+		}
+
+		// norecoil.
+		g_cl.m_cmd->m_view_angles -= g_cl.m_local->m_aimPunchAngle( ) * g_csgo.weapon_recoil_scale->GetFloat( );
+
+		// store fired shot.
+		if ( g_cl.IsFiring( game::TICKS_TO_TIME( g_cl.m_local->m_nTickBase( ) ) ) ) {
+			g_shots.OnShotFire( m_target ? m_target : nullptr, m_target ? m_damage : -1.f, 1, m_target ? m_record : nullptr, m_hitbox );
+
+			// set that we fired.
+			g_cl.m_shot = true;
+		}
+
+		if ( !m_shoot_next_tick && ( g_cl.m_goal_shift == ( g_cl.m_max_lag - (14 - g_cfg[ XOR( "aimbot_exploits_teleport_ticks" ) ].get< int >( ) ) ) ) && g_tickbase.m_shift_data.m_should_attempt_shift && !( g_tickbase.m_shift_data.m_prepare_recharge || g_tickbase.m_shift_data.m_did_shift_before && !g_tickbase.m_shift_data.m_should_be_ready ) ) {
+			m_shoot_next_tick = true;
+		}
+	}
+}
+
+
+bool Aimbot::CanHit( vec3_t start, vec3_t end, LagComp::LagRecord_t* record, int box, bool in_shot, BoneArray* bones )
+{
+	if ( !record || !record->m_pEntity )
+		return false;
+
+	// backup player
+	const auto backup_origin = record->m_pEntity->m_vecOrigin( );
+	const auto backup_abs_origin = record->m_pEntity->GetAbsOrigin( );
+	const auto backup_abs_angles = record->m_pEntity->GetAbsAngles( );
+	const auto backup_obb_mins = record->m_pEntity->m_vecMins( );
+	const auto backup_obb_maxs = record->m_pEntity->m_vecMaxs( );
+	const auto backup_cache = record->m_pEntity->m_BoneCache2( );
+
+	// always try to use our aimbot matrix first.
+	auto matrix = m_current_matrix;
+
+	// this is basically for using a custom matrix.
+	if ( in_shot )
+		matrix = bones;
+
+	if ( !matrix )
+		return false;
+
+	const model_t* model = record->m_pEntity->GetModel( );
+	if ( !model )
+		return false;
+
+	studiohdr_t* hdr = g_csgo.m_model_info->GetStudioModel( model );
+	if ( !hdr )
+		return false;
+
+	mstudiohitboxset_t* set = hdr->GetHitboxSet( record->m_pEntity->m_nHitboxSet( ) );
+	if ( !set )
+		return false;
+
+	mstudiobbox_t* bbox = set->GetHitbox( box );
+	if ( !bbox )
+		return false;
+
+	vec3_t min, max;
+	const auto IsCapsule = false && bbox->m_radius != -1.f; //crash
+
+	if ( IsCapsule ) {
+		math::VectorTransform( bbox->m_mins, matrix[ bbox->m_bone ], min );
+		math::VectorTransform( bbox->m_maxs, matrix[ bbox->m_bone ], max );
+		const auto dist = math::SegmentToSegment( start, end, min, max );
+
+		if ( dist < bbox->m_radius ) {
+			return true;
+		}
+	}
+	else {
+		CGameTrace tr;
+
+		// setup trace data
+		record->m_pEntity->m_vecOrigin( ) = record->m_vecOrigin;
+		record->m_pEntity->SetAbsOrigin( record->m_vecOrigin );
+		record->m_pEntity->SetAbsAngles( record->m_angAbsAngles );
+		record->m_pEntity->m_vecMins( ) = record->m_vecMins;
+		record->m_pEntity->m_vecMaxs( ) = record->m_vecMaxs;
+		record->m_pEntity->m_BoneCache2( ) = reinterpret_cast< matrix3x4_t** >( matrix );
+
+		// setup ray and trace.
+		g_csgo.m_engine_trace->ClipRayToEntity( Ray( start, end ), MASK_SHOT, record->m_pEntity, &tr );
+
+		record->m_pEntity->m_vecOrigin( ) = backup_origin;
+		record->m_pEntity->SetAbsOrigin( backup_abs_origin );
+		record->m_pEntity->SetAbsAngles( backup_abs_angles );
+		record->m_pEntity->m_vecMins( ) = backup_obb_mins;
+		record->m_pEntity->m_vecMaxs( ) = backup_obb_maxs;
+		record->m_pEntity->m_BoneCache2( ) = backup_cache;
+
+		// check if we hit a valid player / hitgroup on the player and increment total hits.
+		if ( tr.m_entity == record->m_pEntity && game::IsValidHitgroup( tr.m_hitgroup ) )
+			return true;
+	}
+
+	return false;
+}
+
+void Aimbot::update_config( ) {
+
+	const char* weapon_name = XOR( "gen" );
+
+	if ( !g_cl.m_local || !g_cl.m_weapon )
+		goto GENERAL;
+
+	// get weapon name.
+	if ( g_cfg[ XOR( "aimbot_adaptive_config" ) ].get< bool >( ) ) {
+		switch ( g_cl.m_local->GetActiveWeapon( )->m_iItemDefinitionIndex( ) ) {
+		case Weapons_t::GLOCK: case Weapons_t::USPS: case Weapons_t::FIVESEVEN:
+		case Weapons_t::P250: case Weapons_t::TEC9:
+		case Weapons_t::ELITE: weapon_name = XOR( "pistol" ); break;
+		case Weapons_t::REVOLVER: case Weapons_t::DEAGLE: weapon_name = XOR( "r8" ); break;
+		case Weapons_t::SSG08: weapon_name = XOR( "ssg08" ); break;
+		case Weapons_t::SCAR20: case Weapons_t::G3SG1: weapon_name = XOR( "auto" );  break;
+		case Weapons_t::AWP: weapon_name = XOR( "awp" ); break;
+		default: weapon_name = XOR( "other" ); break;
+		}
+	}
+GENERAL:
+
+	m_autostop = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autostop" ) ) ) ].get<bool>( );
+	m_minimum_hitchance = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hc" ) ) ) ].get<int>( );
+	m_overriden_hitchance = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hc" ) ) ) ].get<int>( );
+	m_minimum_damage = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "min_dmg" ) ) ) ].get<int>( );
+	m_minimum_penetration_damage = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "min_penetration_dmg" ) ) ) ].get<int>( );
+	m_overriden_damage = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_min_dmg" ) ) ) ].get<int>( );
+	m_autoscope = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autoscope" ) ) ) ].get<bool>( );
+	m_between_shots = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autostop_between" ) ) ) ].get<bool>( );
+	m_force_accuracy = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autostop_force" ) ) ) ].get<bool>( );
+	m_in_air = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autostop_air" ) ) ) ].get<bool>( );
+	m_duck = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "autostop_duck" ) ) ) ].get<bool>( );
+
+	m_bodyscale = g_cfg [ std::string ( XOR ( "aimbot_" ) + std::string ( weapon_name ) + std::string ( XOR ( "_" ) ) + std::string ( XOR ( "bodyscale" ) ) ) ].get<int> ( );
+	m_headscale = g_cfg [ std::string ( XOR ( "aimbot_" ) + std::string ( weapon_name ) + std::string ( XOR ( "_" ) ) + std::string ( XOR ( "headscale" ) ) ) ].get<int> ( );
+
+	m_normal_hitboxes.head = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_head" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.neck = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_upper_body" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.upper_chest = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_upper_chest" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.body = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_lower_body" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.stomach = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_stomach" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.feet = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_legs" ) ) ) ].get<bool>( );
+	m_normal_hitboxes.legs = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "hitbox_feet" ) ) ) ].get<bool>( );
+
+	m_multipoint_hitboxes.head = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_head" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.neck = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_upper_body" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.upper_chest = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_upper_chest" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.body = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_lower_body" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.stomach = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_stomach" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.feet = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_legs" ) ) ) ].get<bool>( );
+	m_multipoint_hitboxes.legs = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "mutlipoint_hitbox_feet" ) ) ) ].get<bool>( );
+
+	m_priority_hitbox = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "priority_hitbox" ) ) ) ].get<int>( );
+
+	m_body_in_air = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "body_in_air" ) ) ) ].get<bool>( );
+	m_body_on_crouch = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "body_on_crouch" ) ) ) ].get<bool>( );
+	m_body_lethal = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "body_lethal" ) ) ) ].get<bool>( );
+	m_body_lethal2 = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "body_lethal2" ) ) ) ].get<bool>( );
+
+	m_overriden_hitboxes.head = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_head" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.neck = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_upper_body" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.upper_chest = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_upper_chest" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.body = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_lower_body" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.stomach = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_stomach" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.feet = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_legs" ) ) ) ].get<bool>( );
+	m_overriden_hitboxes.legs = g_cfg[ std::string( XOR( "aimbot_" ) + std::string( weapon_name ) + std::string( XOR( "_" ) ) + std::string( XOR( "overriden_hitbox_feet" ) ) ) ].get<bool>( );
+} 
+ 265  aimbot.h 
+@@ -0,0 +1,265 @@
+#pragma once
+
+class Sphere;
+
+enum HitscanMode : int {
+	NORMAL = 0,
+	LETHAL = 1,
+	LETHAL2 = 3,
+	PREFER = 4,
+	PREFER_SAFEPOINT = 5,
+};
+
+struct AnimationBackup_t {
+	vec3_t           m_origin, m_abs_origin;
+	vec3_t           m_velocity, m_abs_velocity;
+	int              m_flags, m_eflags;
+	float            m_duck, m_body;
+	C_AnimationLayer m_layers[ 13 ];
+};
+
+class C_Hitbox
+{
+public:
+	int hitboxID;
+	bool isOBB;
+	vec3_t mins;
+	vec3_t maxs;
+	float radius;
+	int bone;
+};
+
+struct HitscanData_t {
+	float  m_damage;
+	vec3_t m_pos;
+	int m_hitbox;
+	bool m_safepoint;
+	int m_mode;
+
+	__forceinline HitscanData_t( ) : m_damage{ 0.f }, m_pos{ }, m_hitbox{ }, m_safepoint{}, m_mode{} {}
+};
+
+struct HitboxConfig_t {
+	bool head;
+	bool neck;
+	bool upper_chest;
+	bool stomach;
+	bool body;
+	bool legs;
+	bool feet;
+};
+
+struct HitscanBox_t {
+	int         m_index;
+	HitscanMode m_mode;
+	bool m_safepoint;
+
+	__forceinline bool operator==( const HitscanBox_t& c ) const {
+		return m_index == c.m_index && m_mode == c.m_mode && m_safepoint == c.m_safepoint;
+	}
+};
+
+class AimPlayer {
+public:
+	using hitboxcan_t = std::vector< HitscanBox_t >;
+
+public:
+	// essential data.
+	Player* m_player;
+	float	  m_spawn;
+
+	// aimbot data.
+	hitboxcan_t m_hitboxes;
+
+	// resolve data.
+	int       m_shots;
+	int       m_missed_shots;
+	float     m_delta;
+	float	  m_last_resolve;
+	bool      m_extending;
+	int m_index;
+	int m_brute_mode;
+
+	float m_abs_angles;
+
+	BoneArray* m_matrix;
+
+public:
+
+	void OnNetUpdate( Player* player );
+	void OnRoundStart( Player* player );
+	void CalculateHitboxData( C_Hitbox* rtn, Player* ent, int ihitbox, matrix3x4_t* matrix );
+	bool CanSafepoint( LagComp::LagRecord_t* record, vec3_t aimpoint, int hitbox );
+	void SetupHitboxes( LagComp::LagRecord_t* record, bool history );
+	bool SetupHitboxPoints( LagComp::LagRecord_t* record, BoneArray* bones, int index, std::vector< vec3_t >& points );
+	bool GetBestAimPosition( vec3_t& aim, float& damage, int& hitbox, LagComp::LagRecord_t* record, float& min_damage );
+	bool SafePointMultiPoint( LagComp::LagRecord_t* record, BoneArray* bones, int index, std::vector<vec3_t>& points );
+public:
+	void reset( ) {
+		m_player = nullptr;
+		m_spawn = 0.f;
+		m_shots = 0;
+		m_missed_shots = 0;
+
+		m_hitboxes.clear( );
+	}
+};
+
+class Aimbot {
+private:
+	struct target_t {
+		Player* m_player;
+		AimPlayer* m_data;
+	};
+
+	struct knife_target_t {
+		target_t  m_target;
+	};
+
+	struct table_t {
+		uint8_t swing[ 2 ][ 2 ][ 2 ]; // [ first ][ armor ][ back ]
+		uint8_t stab[ 2 ][ 2 ];		  // [ armor ][ back ]
+	};
+
+	struct test_parallel_t {
+
+	};
+
+	const table_t m_knife_dmg{ { { { 25, 90 }, { 21, 76 } }, { { 40, 90 }, { 34, 76 } } }, { { 65, 180 }, { 55, 153 } } };
+
+	std::array< ang_t, 12 > m_knife_ang{
+		ang_t{ 0.f, 0.f, 0.f }, ang_t{ 0.f, -90.f, 0.f }, ang_t{ 0.f, 90.f, 0.f }, ang_t{ 0.f, 180.f, 0.f },
+		ang_t{ -80.f, 0.f, 0.f }, ang_t{ -80.f, -90.f, 0.f }, ang_t{ -80.f, 90.f, 0.f }, ang_t{ -80.f, 180.f, 0.f },
+		ang_t{ 80.f, 0.f, 0.f }, ang_t{ 80.f, -90.f, 0.f }, ang_t{ 80.f, 90.f, 0.f }, ang_t{ 80.f, 180.f, 0.f }
+	};
+
+public:
+	std::array< AimPlayer, 64 > m_players;
+	std::vector< AimPlayer* >   m_targets;
+	std::vector< AimPlayer* >   m_sorted_targets;
+
+	test_parallel_t parallel;
+
+	AimPlayer* m_old_target;
+
+	// target selection stuff.
+	float m_best_dist;
+	float m_best_fov;
+	float m_best_damage;
+
+	// multithreading data.
+	bool m_attack;
+	bool m_attack2;
+
+
+	struct HitchanceThread_t
+	{
+		float A, B, C, D;
+	};
+
+	HitchanceThread_t HitchanceJobs[ 256 ];
+
+	// found target stuff.
+	Player* m_target;
+	ang_t      m_angle;
+	vec3_t     m_aim;
+	float      m_damage;
+	LagComp::LagRecord_t* m_record;
+
+	// target
+	int m_hitbox;
+	bool m_stop;
+	bool m_did_stop;
+	bool m_override_damage;
+	bool m_override_hitchance;
+	bool m_force_body;
+	bool m_shoot_next_tick;
+	bool m_force_safepoint;
+	BoneArray* m_current_matrix;
+
+	// settings.
+	int m_minimum_damage;
+	int m_minimum_penetration_damage;
+	int m_minimum_hitchance;
+	int m_overriden_hitchance;
+	int m_overriden_damage;
+	bool m_enable;
+	bool m_override_hitboxes;
+	bool m_autostop;
+	int m_headscale;
+	int m_bodyscale;
+	int m_autostop_mode;
+	bool m_autoscope;
+	bool m_between_shots;
+	bool m_force_accuracy;
+	bool m_in_air;
+	bool m_duck;
+
+	bool m_body_in_air;
+	bool m_body_on_crouch;
+	bool m_body_lethal;
+	bool m_body_lethal2;
+
+	int m_priority_hitbox;
+
+	HitboxConfig_t m_normal_hitboxes;
+	HitboxConfig_t m_multipoint_hitboxes;
+	HitboxConfig_t m_overriden_hitboxes;
+
+	std::vector<Sphere> m_current_sphere;
+public:
+	__forceinline void reset( ) {
+		// reset aimbot data.
+		init( );
+
+		// reset all players data.
+		for ( auto& p : m_players )
+			p.reset( );
+	}
+
+	__forceinline bool IsValidTarget( Player* player ) {
+		if ( !player )
+			return false;
+
+		if ( !player->IsPlayer( ) )
+			return false;
+
+		if ( !player->alive( ) )
+			return false;
+
+		if ( player->m_bIsLocalPlayer( ) )
+			return false;
+
+		if ( !player->enemy( g_cl.m_local ) )
+			return false;
+
+		return true;
+	}
+
+	void update_config( );
+
+	bool CanHit( vec3_t start, vec3_t end, LagComp::LagRecord_t* record, int box, bool in_shot = false, BoneArray* bones = nullptr );
+
+public:
+	// aimbot.
+	void init( );
+	void StripAttack( );
+	void think( );
+	bool AdjustVelocity( );
+	static void find( test_parallel_t& data );
+	bool SortTargets( LagComp::LagRecord_t* record, const vec3_t& aim, float damage );
+	void apply( );
+	static void __cdecl HitchanceThread( HitchanceThread_t& args );
+
+	bool CheckHitchance( Player* player, const ang_t& angle, LagComp::LagRecord_t* record, int hitbox );
+
+	bool CheckHitchance( Player* player, const ang_t& angle );
+
+	// knifebot.
+	void knife( );
+	bool CanKnife( LagComp::LagRecord_t* record, ang_t angle, bool& stab );
+	bool KnifeTrace( vec3_t dir, bool stab, CGameTrace* trace );
+	bool KnifeIsBehind( LagComp::LagRecord_t* record );
+};
+
+extern Aimbot g_aimbot; 
+ 316  lagcomp.cpp 
+@@ -0,0 +1,316 @@
+#include "gamesense.h"
+
+LagComp g_lagcompensation{ };;
+
+LagComp::LagRecord_t::LagRecord_t( Player* pEntity ) {
+	const auto pWeapon = pEntity->GetActiveWeapon( );
+
+	this->m_pEntity = pEntity;
+	m_iEntIndex = pEntity->index( );
+	m_bDormant = pEntity->dormant( );
+	m_vecVelocity = pEntity->m_vecVelocity( );
+	m_vecOrigin = pEntity->m_vecOrigin( );
+	m_vecAbsOrigin = pEntity->GetAbsOrigin( );
+	m_vecMins = pEntity->m_vecMins( );
+	m_vecMaxs = pEntity->m_vecMaxs( );
+	pEntity->GetAnimLayers( m_pLayers );
+	pEntity->GetPoseParameters( m_pPoses );
+	m_pState = pEntity->m_PlayerAnimState( ) ? pEntity->m_PlayerAnimState( ) : nullptr;
+	m_flSimulationTime = pEntity->m_flSimulationTime( );
+	m_flInterpTime = 0.f;
+	m_flLastShotTime = pWeapon ? pWeapon->m_fLastShotTime( ) : 0.f;
+	m_flDuck = pEntity->m_flDuckAmount( );
+	m_flLowerBodyYawTarget = pEntity->m_flLowerBodyYawTarget( );
+	m_angEyeAngles = pEntity->m_angEyeAngles( );
+	m_angAbsAngles = pEntity->GetAbsAngles( );
+	m_fFlags = pEntity->m_fFlags( );
+	m_iEFlags = pEntity->m_iEFlags( );
+	m_iEffects = pEntity->m_fEffects( );
+	m_iChoked = game::TIME_TO_TICKS( pEntity->m_flSimulationTime( ) - pEntity->m_flOldSimulationTime( ) );
+
+	m_iChoked = std::clamp( m_iChoked, 0, ( g_csgo.m_cvar->FindVar( HASH( "sv_maxusrcmdprocessticks" ) )->GetInt( ) + 1 ) );
+
+	m_bValid = m_iChoked >= 0 && m_iChoked <= ( g_csgo.m_cvar->FindVar( HASH( "sv_maxusrcmdprocessticks" ) )->GetInt( ) + 1 );
+
+		//memcpy( left_matrix, g_aimbot.m_overlap_data[ pEntity->index( ) - 1 ].m_left_matrix, sizeof( matrix3x4_t ) * pEntity->GetBoneCount( ) );
+	//	memcpy( right_matrix, g_aimbot.m_overlap_data[ pEntity->index( ) - 1 ].m_right_matrix, sizeof( matrix3x4_t ) * pEntity->GetBoneCount( ) );
+		//memcpy( center_matrix, g_aimbot.m_overlap_data[ pEntity->index( ) - 1 ].m_center_matrix, sizeof( matrix3x4_t ) * pEntity->GetBoneCount( ) );
+
+}
+
+LagComp::LagRecord_t::LagRecord_t( Player* pEntity, ang_t vecLastReliableAngle ) : LagRecord_t( pEntity ) {
+	this->m_angLastReliableAngle = vecLastReliableAngle;
+}
+
+bool LagComp::LagRecord_t::IsValid( float flSimulationTime, bool bValid, float flRange ) {
+	if ( !g_csgo.m_net || !bValid )
+		return false;
+
+	static auto sv_maxunlag = g_csgo.m_cvar->FindVar( HASH( "sv_maxunlag" ) );
+
+	const auto flCorrect = std::clamp( g_csgo.m_net->GetLatency( INetChannel::FLOW_INCOMING )
+		+ g_csgo.m_net->GetLatency( INetChannel::FLOW_OUTGOING )
+		+ g_cl.m_lerp, 0.f, sv_maxunlag->GetFloat( ) );
+
+	return fabsf( flCorrect - ( g_csgo.m_globals->m_curtime - flSimulationTime ) ) <= flRange;
+}
+
+void LagComp::LagRecord_t::BuildBones( Player* player, bool resolve ) {
+	const auto backup_occlusion_flags = player->m_iOcclusionFlags( );
+	const auto backup_occlusion_framecount = player->m_iOcclusionFramecount( );
+
+	g_anims.m_bEnablePVS = true;
+
+	player->m_iOcclusionFlags( ) = 0;
+	player->m_iOcclusionFramecount( ) = 0;
+
+	player->GetReadableBones( ) = player->GetWriteableBones( ) = 0;
+
+	player->m_iMostRecentModelBoneCounter( ) = 0;
+	player->m_flLastBoneSetupTime( ) = -FLT_MAX;
+
+	player->m_fEffects( ) |= 8;
+
+	const auto backup_bone = player->GetBoneArrayForWrite( );
+	player->GetBoneArrayForWrite( ) = m_pMatrix_Resolved;
+
+	player->SetupBones( nullptr, -1, 0x7FF00, m_flSimulationTime );
+
+	player->GetBoneArrayForWrite( ) = backup_bone;
+
+	player->m_iOcclusionFlags( ) = backup_occlusion_flags;
+
+	player->m_iOcclusionFramecount( ) = backup_occlusion_framecount;
+
+	g_anims.m_bEnablePVS = false;
+
+	player->m_fEffects( ) &= ~8;
+}
+
+void LagComp::LagRecord_t::Restore( Player* player ) {
+	player->m_vecVelocity( ) = m_vecVelocity;
+	player->m_fFlags( ) = m_fFlags;
+	player->m_iEFlags( ) = m_iEFlags;
+	player->m_flDuckAmount( ) = m_flDuck;
+	player->SetAnimLayers( m_pLayers );
+	player->m_flLowerBodyYawTarget( ) = m_flLowerBodyYawTarget;
+	player->m_vecOrigin( ) = m_vecOrigin;
+	player->SetAbsOrigin( m_vecAbsOrigin );
+}
+
+void LagComp::LagRecord_t::Apply( Player* player ) {
+	player->SetPoseParameters( m_pPoses );
+	player->m_angEyeAngles( ) = m_angEyeAngles;
+	player->m_vecVelocity( ) = player->m_vecAbsVelocity( ) = m_vecVelocity;
+	player->m_flLowerBodyYawTarget( ) = m_flLowerBodyYawTarget;
+	player->m_flDuckAmount( ) = m_flDuck;
+	player->m_fFlags( ) = m_fFlags;
+	player->m_vecOrigin( ) = m_vecOrigin;
+	player->SetAbsOrigin( m_vecOrigin );
+	if ( player->m_PlayerAnimState( ) ) {
+		player->SetPlayerAnimState( m_pState );
+	}
+}
+
+void LagComp::PostPlayerUpdate( ) {
+	if ( !g_cl.m_local ) {
+		if ( g_anims.m_ulAnimationInfo.size( ) ) {
+			g_anims.m_ulAnimationInfo.clear( );
+		}
+
+		return;
+	}
+
+	for ( auto it = g_anims.m_ulAnimationInfo.begin( ); it != g_anims.m_ulAnimationInfo.end( );) {
+		const auto handle = it->first;
+
+		Player* const player = g_csgo.m_entlist->GetClientEntityFromHandle< Player* >( handle );
+
+		if ( !player || player != it->second.m_pEntity || !player->alive( ) || !player->enemy( g_cl.m_local ) ) {
+			if ( player ) {
+				player->m_bClientSideAnimation( ) = true;
+			}
+
+			it = g_anims.m_ulAnimationInfo.erase( it );
+		}
+		else {
+			it = next( it );
+		}
+	}
+
+	for ( int i{ 1 }; i <= g_csgo.m_globals->m_max_clients; ++i ) {
+		Player* const player = g_csgo.m_entlist->GetClientEntity< Player* >( i );
+		if ( !player )
+			continue;
+
+		if ( !player->enemy( g_cl.m_local ) && !player->m_bIsLocalPlayer( ) )
+			player->m_bClientSideAnimation( ) = true;
+
+		if ( !player->alive( ) || !player->enemy( g_cl.m_local ) )
+			continue;
+
+		if ( g_anims.m_ulAnimationInfo.find( player->GetRefEHandle( ) ) == g_anims.m_ulAnimationInfo.end( ) )
+			g_anims.m_ulAnimationInfo.insert_or_assign( player->GetRefEHandle( ), Animations::AnimationInfo_t( player, { } ) );
+	}
+
+	for ( auto& ulAnimInfo : g_anims.m_ulAnimationInfo ) {
+		Animations::AnimationInfo_t& pRecord = ulAnimInfo.second;
+		Player* const pEntity = pRecord.m_pEntity;
+
+		for ( auto i = pRecord.m_pRecords.rbegin( ); i != pRecord.m_pRecords.rend( );) {
+			if ( g_csgo.m_globals->m_curtime - i->m_flSimulationTime > 1.2f )
+				i = decltype( i ) { ulAnimInfo.second.m_pRecords.erase( next( i ).base( ) ) };
+			else
+				i = next( i );
+		}
+
+		if ( pEntity->m_flSimulationTime( ) == pEntity->m_flOldSimulationTime( ) )
+			continue;
+
+		CCSGOPlayerAnimState* const state = pEntity->m_PlayerAnimState( );
+
+		if ( pRecord.m_flLastSpawnTime != pEntity->m_flSpawnTime( ) ) {
+			if ( state ) {
+				game::ResetAnimationState( state );
+			}
+
+			pRecord.m_flLastSpawnTime = pEntity->m_flSpawnTime( );
+		}
+
+		const auto pWeapon = pEntity->GetActiveWeapon( );
+
+		LagComp::LagRecord_t pBackupRecord = LagComp::LagRecord_t( pEntity );
+		pBackupRecord.Apply( pEntity );
+
+		LagComp::LagRecord_t* pPreviousRecord = nullptr;
+
+		if ( !pRecord.m_pRecords.empty( ) && !pRecord.m_pRecords.front( ).m_bDormant && game::TIME_TO_TICKS( pEntity->m_flSimulationTime( ) - pRecord.m_pRecords.front( ).m_flSimulationTime ) <= ( g_csgo.m_cvar->FindVar( HASH( "sv_maxusrcmdprocessticks" ) )->GetInt( ) + 1 ) ) {
+			pPreviousRecord = &pRecord.m_pRecords.front( );
+			pRecord.m_PreviousRecord = pRecord.m_pRecords.front( );
+		}
+
+		const bool bShot = pWeapon && pPreviousRecord && pWeapon->m_fLastShotTime( ) > pPreviousRecord->m_flSimulationTime && pWeapon->m_fLastShotTime( ) <= pEntity->m_flSimulationTime( );
+
+		if ( !bShot ) {
+			ulAnimInfo.second.m_vecLastReliableAngle = pEntity->m_angEyeAngles( );
+		}
+
+		auto& pCurrentRecord = pRecord.m_pRecords.emplace_front( pEntity, ulAnimInfo.second.m_vecLastReliableAngle );
+
+		pRecord.UpdateAnimations( &pCurrentRecord, pPreviousRecord );
+
+		pEntity->SetAnimLayers( pBackupRecord.m_pLayers );
+
+		pCurrentRecord.BuildBones( pEntity, true );
+
+		pBackupRecord.Restore( pEntity );
+
+		pRecord.m_LatestRecord = pCurrentRecord;
+	}
+}
+
+bool LagComp::BreakingLagCompensation( Player* pEntity ) {
+	const auto valid = g_lagcompensation.GetValidRecords( pEntity );
+
+	if ( valid.size( ) < 2 )
+		return false;
+
+	auto prev_org = valid.at(0)->m_vecOrigin;
+	auto skip_first = true;
+
+	for ( auto& record : valid )
+	{
+		if ( skip_first )
+		{
+			skip_first = false;
+			continue;
+		}
+
+		auto delta = record->m_vecOrigin - prev_org;
+		if ( delta.length_2d_sqr( ) > 4096.f )
+		{
+
+			return true;
+		}
+
+		if ( record->m_flSimulationTime <= pEntity->m_flSimulationTime( ) )
+			break;
+
+		prev_org = record->m_vecOrigin;
+	}
+
+	return false;
+}
+
+std::optional<LagComp::LagRecord_t*> LagComp::GetLatestRecord( Player* pEntity ) {
+	const auto pInfo = g_anims.m_ulAnimationInfo.find( pEntity->GetRefEHandle( ) );
+	if ( pInfo == g_anims.m_ulAnimationInfo.end( ) || pInfo->second.m_pRecords.empty( ) ) {
+		return std::nullopt;
+	}
+
+	LagRecord_t* first_invalid = nullptr;
+
+	for ( auto it = pInfo->second.m_pRecords.begin( ); it != pInfo->second.m_pRecords.end( ); it = next( it ) ) {
+
+		if ( !first_invalid )
+			first_invalid = &*it;
+
+		if ( it->IsValid( it->m_flSimulationTime, it->m_bValid ) ) {
+			return &*it;
+		}
+	}
+
+	if ( first_invalid )
+		return first_invalid;
+	else
+		return std::nullopt;
+}
+
+std::optional<LagComp::LagRecord_t*> LagComp::GetOldestRecord( Player* pEntity ) {
+	const auto pInfo = g_anims.m_ulAnimationInfo.find( pEntity->GetRefEHandle( ) );
+	if ( pInfo == g_anims.m_ulAnimationInfo.end( ) || pInfo->second.m_pRecords.empty( ) ) {
+		return std::nullopt;
+	}
+
+	for ( auto it = pInfo->second.m_pRecords.rbegin( ); it != pInfo->second.m_pRecords.rend( ); it = next( it ) ) {
+		if ( it->IsValid( it->m_flSimulationTime, it->m_bValid ) ) {
+			return &*it;
+		}
+	}
+
+	return std::nullopt;
+}
+
+std::optional<std::pair<LagComp::LagRecord_t*, LagComp::LagRecord_t*>> LagComp::GetViableRecords( Player* pEntity, const float flRange ) {
+	const auto pInfo = g_anims.m_ulAnimationInfo.find( pEntity->GetRefEHandle( ) );
+	if ( pInfo == g_anims.m_ulAnimationInfo.end( ) || pInfo->second.m_pRecords.empty( ) ) {
+		return std::nullopt;
+	}
+
+	for ( auto it = pInfo->second.m_pRecords.begin( ); it != pInfo->second.m_pRecords.end( ); it = next( it ) ) {
+		if ( it->IsValid( it->m_flSimulationTime, it->m_bValid, flRange * .2f ) && it + 1 != pInfo->second.m_pRecords.end( )
+			&& !( it + 1 )->IsValid( ( it + 1 )->m_flSimulationTime, ( it + 1 )->m_bValid, flRange * .2f ) ) {
+			return std::make_pair( &*( it + 1 ), &*it );
+		}
+	}
+
+	return std::nullopt;
+}
+
+std::vector<LagComp::LagRecord_t*> LagComp::GetValidRecords( Player* pEntity, const float flRange ) {
+	std::vector<LagRecord_t*> vecFinalRecord;
+
+	const auto pInfo = g_anims.m_ulAnimationInfo.find( pEntity->GetRefEHandle( ) );
+
+	if ( pInfo == g_anims.m_ulAnimationInfo.end( ) || pInfo->second.m_pRecords.empty( ) )
+		return vecFinalRecord;
+
+	vecFinalRecord.reserve( static_cast< int >( std::ceil( flRange * .2f / g_csgo.m_globals->m_interval ) ) );
+
+	for ( auto it = pInfo->second.m_pRecords.begin( ); it != pInfo->second.m_pRecords.end( ); it = next( it ) ) {
+		if ( it->IsValid( it->m_flSimulationTime, it->m_bValid, flRange * .2f ) )
+			vecFinalRecord.push_back( &*it );
+	}
+
+	return vecFinalRecord;
+} 
+ 98  lagcomp.h 
+@@ -0,0 +1,98 @@
+#pragma once
+
+class AimPlayer;
+
+class LagComp {
+public:
+	struct LagRecord_t {
+		struct LayerData_t {
+			int m_nSequence;
+			float m_flPlaybackRate;
+			float m_flCycle;
+			float m_flWeight;
+			float m_flWeightWithAirSmooth;
+			float m_flFeetWeight;
+
+			float m_flMovementSide;
+			ang_t m_angMoveYaw;
+			vec3_t m_vecDirection;
+		};
+
+		LagRecord_t( ) = default;
+
+		explicit LagRecord_t( Player* pEntity );
+		explicit LagRecord_t( Player* pEntity, ang_t vecLastReliableAngle );
+
+		void Restore( Player* pEntity );
+		void Apply( Player* pEntity );
+		bool IsValid( float flSimulationTime, bool bValid, const float flRange = 0.2f );
+		void BuildBones( Player* player, bool resolve = false );
+
+		Player* m_pEntity;
+		int m_iEntIndex;
+
+		bool m_bValid;
+
+		BoneArray m_pMatrix[128];
+		BoneArray m_pMatrix_Resolved[ 128 ];
+		//BoneArray m_pMatrix_Resolved_Inverted[128];
+
+		BoneArray center_matrix[ 128 ];
+		BoneArray left_matrix[ 128 ];
+		BoneArray right_matrix[ 128 ];
+		C_AnimationLayer right_layers[ 13 ];
+		C_AnimationLayer left_layers[ 13 ];
+		C_AnimationLayer center_layers[ 13 ];
+
+		bool m_bDormant;
+
+		vec3_t m_vecVelocity;
+		vec3_t m_vecOrigin;
+		vec3_t m_vecAbsOrigin;
+		vec3_t m_vecMins;
+		vec3_t m_vecMaxs;
+
+		C_AnimationLayer m_pLayers[ 13 ];
+		float m_pPoses[ 24 ];
+
+		CCSGOPlayerAnimState* m_pState;
+
+		float m_flSimulationTime;
+		float m_flInterpTime;
+		float m_flDuck;
+		float m_flLowerBodyYawTarget;
+		float m_flLastShotTime;
+		float m_flSpawnTime;
+
+		ang_t m_angLastReliableAngle;
+		ang_t m_angEyeAngles;
+		ang_t m_angAbsAngles;
+
+		CBaseHandle m_ulEntHandle;
+
+		int m_fFlags;
+		int m_iEFlags;
+		int m_iEffects;
+		int m_iChoked;
+
+		bool m_bDidShot;
+		bool m_bPrefer = false;
+		bool m_bAllowAnimationUpdate;
+		bool m_bAnimatePlayer;
+
+		LayerData_t m_LayerData[ 3 ];
+	};
+
+	void PostPlayerUpdate( );
+
+	bool BreakingLagCompensation( Player* pEntity );
+
+	std::optional<LagRecord_t*> GetLatestRecord( Player* pEntity );
+	std::optional<LagRecord_t*> GetOldestRecord( Player* pEntity );
+
+	std::optional<std::pair<LagRecord_t*, LagRecord_t*>> GetViableRecords( Player* pEntity, float flRange = 1.0f );
+
+	std::vector<LagComp::LagRecord_t*> GetValidRecords( Player* pEntity, const float flRange = 1.0f );
+};
+
+extern LagComp g_lagcompensation; 
+ 587  resolver.cpp 
+@@ -0,0 +1,587 @@
+#include "gamesense.h"
+#include <random>
+#include <algorithm>
+Resolver g_resolver { };;
+Player* m_pPlayer;
+/* fix stored data */
+void Resolver::BackupData ( BackupData_t* m_data ) {
+	std::memcpy ( &m_data->m_nBackupState, m_data->m_pPlayer->m_PlayerAnimState ( ), sizeof ( CCSGOPlayerAnimState ) );
+	m_data->m_pPlayer->GetAnimLayers ( m_data->m_nBackupLayers );
+	m_data->m_nBackupAngles = m_data->m_pPlayer->m_angEyeAngles ( );
+	m_data->m_nBackupSimulationTime = m_data->m_pPlayer->m_flSimulationTime ( );
+	m_data->m_nBackupDuckAmount = m_data->m_pPlayer->m_flDuckAmount ( );
+	m_data->m_pPlayer->GetPoseParameters ( m_data->m_nBackupPoses );
+	m_data->m_nBackupGoalFeetYaw = m_data->m_pPlayer->m_PlayerAnimState ( )->goal_feet_yaw;
+	m_data->m_nBackupClientSideAnimation = m_data->m_pPlayer->m_bClientSideAnimation ( );
+	m_data->m_flBackupLowerBodyTarget = m_data->m_pPlayer->m_flLowerBodyYawTarget ( );
+	m_data->m_nBackupFlags = m_data->m_pPlayer->m_fFlags ( );
+	m_data->m_nBackupVelocity = m_data->m_pPlayer->m_vecVelocity ( );
+	m_data->m_nBackupOrigin = m_data->m_pPlayer->m_vecOrigin ( );
+	m_data->m_nBackupAbsVelocity = m_data->m_pPlayer->m_vecAbsVelocity ( );
+	m_data->m_nBackupDucked = m_data->m_pPlayer->m_bDucking ( );
+}
+void Resolver::RestoreData ( BackupData_t* m_data ) {
+	m_data->m_pPlayer->SetAnimLayers ( m_data->m_nBackupLayers );
+	memcpy ( m_data->m_pPlayer->m_PlayerAnimState ( ), &m_data->m_nBackupState, sizeof ( CCSGOPlayerAnimState ) );
+	m_data->m_pPlayer->SetPoseParameters ( m_data->m_nBackupPoses );
+	m_data->m_pPlayer->m_angEyeAngles ( ) = m_data->m_nBackupAngles;
+	m_data->m_pPlayer->m_bDucking ( ) = m_data->m_nBackupDucked;
+	m_data->m_pPlayer->m_vecVelocity ( ) = m_data->m_nBackupVelocity;
+	m_data->m_pPlayer->m_flDuckAmount ( ) = m_data->m_nBackupDuckAmount;
+	m_data->m_pPlayer->SetPoseParameters ( m_data->m_nBackupPoses );
+	m_data->m_pPlayer->m_vecOrigin ( ) = m_data->m_nBackupOrigin;
+	m_data->m_pPlayer->m_flLowerBodyYawTarget ( ) = m_data->m_flBackupLowerBodyTarget;
+	m_data->m_pPlayer->m_fFlags ( ) = m_data->m_nBackupFlags;
+	m_data->m_pPlayer->SetAbsVelocity ( m_data->m_nBackupAbsVelocity );
+	m_data->m_pPlayer->m_flSimulationTime ( ) = m_data->m_nBackupSimulationTime;
+	m_data->m_pPlayer->m_bClientSideAnimation ( ) = m_data->m_nBackupClientSideAnimation;
+}
+void Resolver::StoreMatrices ( LagComp::LagRecord_t& record ) {
+
+	// create backup data.
+	BackupData_t data { };
+
+	// get our player for easier use.
+	m_pPlayer = record.m_pEntity;
+
+	data.m_pPlayer = m_pPlayer;
+
+	// get delta between eyeangles and goalfeetyaw
+	auto m_flEyeDelta = math::AngleDiff ( record.m_angEyeAngles.y, record.m_pState->goal_feet_yaw );
+
+	// check if player has "inverted" desync
+	auto m_bDeltaCheck = m_flEyeDelta <= 0.f;
+
+	// get and clamp the player's choked commands
+	auto m_nChoked = std::clamp ( record.m_iChoked, 1, 17 );
+
+	// backup all player values.
+	g_resolver.BackupData ( &data );
+
+	int lag = record.m_iChoked;
+
+	// update center.
+	m_pPlayer->InvalidateBoneCache ( );
+	m_pPlayer->m_bClientSideAnimation ( ) = true;
+	m_pPlayer->UpdateClientSideAnimation ( );
+	m_pPlayer->m_bClientSideAnimation ( ) = false;
+	m_pPlayer->SetupBones ( nullptr, 128, BONE_USED_BY_ANYTHING, m_pPlayer->m_flSimulationTime ( ) );
+	float center_playback = record.m_pEntity->m_AnimOverlay ( ) [ 6 ].m_playback_rate;
+	memcpy ( record.center_matrix, m_pPlayer->m_BoneCache ( ).m_pCachedBones->Base ( ), sizeof ( matrix3x4_t ) * m_pPlayer->GetBoneCount ( ) );
+	memcpy ( g_chams.m_stored_matrices [ m_pPlayer->index ( ) - 1 ], record.center_matrix, sizeof ( matrix3x4_t ) * m_pPlayer->GetBoneCount ( ) );
+	m_pPlayer->GetAnimLayers ( record.center_layers );
+	g_anims.RebuiltLayer6( m_pPlayer, &record.m_LayerData[ 0 ] );//TESTING
+
+	// restore.
+	g_resolver.RestoreData ( &data );
+
+	// update left.
+	if ( m_nChoked <= 1 ) {
+		g_anims.UpdateAnimations ( m_pPlayer, &record, -1 );
+		m_pPlayer->GetAnimLayers ( record.left_layers );
+	}
+	else {
+		g_anims.UpdateAnimations ( m_pPlayer, &record, 1 );
+
+		m_pPlayer->GetAnimLayers ( record.right_layers );
+		m_pPlayer->InvalidateBoneCache ( );
+		m_pPlayer->SetupBones ( nullptr, 128, BONE_USED_BY_ANYTHING, m_pPlayer->m_flSimulationTime ( ) );
+		memcpy ( record.right_matrix, m_pPlayer->m_BoneCache ( ).m_pCachedBones->Base ( ), sizeof ( matrix3x4_t ) * m_pPlayer->GetBoneCount ( ) );
+	}
+	g_anims.RebuiltLayer6( m_pPlayer, &record.m_LayerData[ 1 ] );//TESTING
+
+			// restore.
+	g_resolver.RestoreData ( &data );
+
+	// update right.
+	if ( m_nChoked <= 1 ) {
+		g_anims.UpdateAnimations ( m_pPlayer, &record, 1 );
+		m_pPlayer->GetAnimLayers ( record.right_layers );
+	}
+	else {
+		g_anims.UpdateAnimations ( m_pPlayer, &record, -1 );
+		m_pPlayer->GetAnimLayers ( record.left_layers );
+		m_pPlayer->InvalidateBoneCache ( );
+		m_pPlayer->SetupBones ( nullptr, 128, BONE_USED_BY_ANYTHING, m_pPlayer->m_flSimulationTime ( ) );
+		memcpy ( record.left_matrix, m_pPlayer->m_BoneCache ( ).m_pCachedBones->Base ( ), sizeof ( matrix3x4_t ) * m_pPlayer->GetBoneCount ( ) );
+	}
+
+	// store data from rebuilt animations.
+    g_anims.RebuiltLayer6( m_pPlayer, &record.m_LayerData[ 2 ] ); //TESTING
+
+	// restore.
+	g_resolver.RestoreData ( &data );
+	g_anims.UpdateAnimations ( m_pPlayer, &record, 0 );
+}
+
+void Resolver::ResolveAngles ( Player* player, LagComp::LagRecord_t* record, LagComp::LagRecord_t* prev_record ) {
+	AimPlayer* data = &g_aimbot.m_players [ player->index ( ) - 1 ];
+
+	/* calling settup detecting */
+	Resolver::setup_detect ( data, player, record );
+
+	/* resolve entity */
+	if ( record->m_bValid && record->m_iChoked > 1 && record->m_iChoked < ( g_csgo.m_cvar->FindVar ( HASH ( "sv_maxusrcmdprocessticks" ) )->GetInt ( ) + 1 ) )
+		ResolveEntity ( player, data, record, prev_record );
+
+	player->SetupBones ( record->m_pMatrix, 128, BONE_USED_BY_ANYTHING, 0.0f );
+}
+
+/* detect side output things */
+float get_backward_side ( Player* player ) {
+	if ( !g_cl.m_processing )
+		return -1.f;
+
+	return math::CalcAngle ( g_cl.m_local->m_vecOrigin ( ), player->m_vecOrigin ( ) ).y;
+}
+
+/* detect desync side */
+void Resolver::detect_side ( Player* player, int* side ) {
+	/* externs */
+	vec3_t src3D, dst3D, forward, right, up, src, dst;
+	float back_two, right_two, left_two;
+	CGameTrace tr;
+	CTraceFilterSimple filter;
+
+	/* angle vectors */
+	math::AngleVectors ( ang_t ( 0, get_backward_side ( player ), 0 ), &forward, &right, &up );
+
+	/* filtering */
+	filter.SetPassEntity ( player );
+	src3D = player->Weapon_ShootPosition ( );
+	dst3D = src3D + ( forward * 384 );
+
+	/* back engine tracers */
+	g_csgo.m_engine_trace->TraceRay ( Ray ( src3D, dst3D ), MASK_SHOT, &filter, &tr );
+	back_two = ( tr.m_endpos - tr.m_startpos ).length ( );
+
+	/* right engine tracers */
+	g_csgo.m_engine_trace->TraceRay ( Ray ( src3D + right * 35, dst3D + right * 35 ), MASK_SHOT, &filter, &tr );
+	right_two = ( tr.m_endpos - tr.m_startpos ).length ( );
+
+	/* left engine tracers */
+	g_csgo.m_engine_trace->TraceRay ( Ray ( src3D - right * 35, dst3D - right * 35 ), MASK_SHOT, &filter, &tr );
+	left_two = ( tr.m_endpos - tr.m_startpos ).length ( );
+
+	/* fix side */
+	if ( left_two > right_two ) {
+		*side = -1;
+	}
+	else if ( right_two > left_two ) {
+		*side = 1;
+	}
+	else
+		*side = 0;
+}
+
+/* check low desync delta defines */
+#define delta(angle1, angle2) remainderf(fabsf(angle1 - angle2), 360.0f)
+#define n(yaw) math::NormalizeYaw(fabsf(yaw))
+#define ca(angle1, angle2) math::CalcAngle(angle1, angle2)
+
+/* check low desync delta */
+void Resolver::check_low_delta_desync ( AimPlayer* data, Player* player, LagComp::LagRecord_t* record ) {
+	/* setup animstate */
+	CCSGOPlayerAnimState* animstate = player->m_PlayerAnimState ( );
+
+	/* setup desync delta vars */
+	static float fl_stored_yaw = player->m_angEyeAngles ( ).y;
+	float fl_eye_yaw = player->m_angEyeAngles ( ).y;
+	float fl_lby_yaw = player->m_flLowerBodyYawTarget ( );
+	float fl_desync_delta = delta ( fl_eye_yaw, animstate->goal_feet_yaw );
+	fl_desync_delta = std::clamp ( fl_desync_delta, -60.f, 60.f );
+
+	/* setup target side */
+	float fl_left_yaw = n ( fl_eye_yaw - 60.0 );
+	float fl_right_yaw = n ( fl_eye_yaw + 60.0 );
+
+	/* setup low delta */
+	float fl_left_low_delta = n ( fl_lby_yaw - 35.0 );
+	float fl_right_low_delta = n ( fl_lby_yaw + 35.0 );
+
+	/* setup low desync checker */
+	if ( fabs ( fl_desync_delta ) < 35.f ) {
+		/* settup missed shots */
+		switch ( data->m_missed_shots % 3 ) {
+			case 0: {
+				animstate->goal_feet_yaw = fl_stored_brute [ player->index ( ) ];
+			} break;
+			case 1: {
+				animstate->goal_feet_yaw = fl_left_low_delta;
+				fl_stored_brute [ player->index ( ) ] = fl_left_low_delta;
+			} break;
+			case 2: {
+				animstate->goal_feet_yaw = fl_right_low_delta;
+				fl_stored_brute [ player->index ( ) ] = fl_right_low_delta;
+			} break;
+		}
+	}
+
+	/* fixing moving delta vars */
+	auto target_yaw = math::CalcAngle ( g_cl.m_local->m_vecOrigin ( ), player->m_vecOrigin ( ) ).y;
+	auto target_left_direction = math::NormalizeYaw ( target_yaw - fl_left_yaw );
+	auto target_right_direction = math::NormalizeYaw ( target_yaw - fl_right_yaw );
+
+	/* fixing moving delta */
+	if ( target_left_direction > target_right_direction ) {
+		/* positive right target */
+		animstate->goal_feet_yaw = fl_right_yaw;
+	}
+	else {
+		/* negative left target */
+		animstate->goal_feet_yaw = fl_left_yaw;
+	}
+
+	/* get stored yaw */
+	if ( fl_stored_yaw != fl_eye_yaw ) {
+		if ( animstate->current_feet_yaw != animstate->goal_feet_yaw ) {
+			fl_stored_yaw = player->m_angEyeAngles ( ).y;
+			animstate->current_feet_yaw = animstate->goal_feet_yaw;
+			animstate->goal_feet_yaw = animstate->feet_yaw_rate;
+		}
+	}
+
+	/* check animrate */
+	if ( animstate->feet_yaw_rate != 0 ) {
+		/* check positive */
+		if ( animstate->feet_yaw_rate == 60.0 || animstate->feet_yaw_rate > 60.0 ) {
+			animstate->goal_feet_yaw = fl_right_yaw;
+		}
+		else if ( animstate->feet_yaw_rate == -60.0 || animstate->feet_yaw_rate < -60.0 ) {
+			animstate->goal_feet_yaw = fl_left_yaw;
+		}
+	}
+
+	/* check last desync delta ticks */
+	if ( fabs ( fl_desync_delta ) > 60.0 ) {
+		if ( fabs ( fl_desync_delta ) > 0 ) {
+			animstate->goal_feet_yaw = fl_left_yaw;
+		}
+		else {
+			animstate->goal_feet_yaw = fl_right_yaw;
+		}
+	}
+	else if ( fabs ( fl_desync_delta ) < -60.0 ) {
+		if ( fabs ( fl_desync_delta ) > 0 ) {
+			animstate->goal_feet_yaw = fl_right_yaw;
+		}
+		else {
+			animstate->goal_feet_yaw = fl_left_yaw;
+		}
+	}
+
+	/* check if low delta was wrong */
+	if ( data->m_missed_shots == 1 && fl_stored_brute [ player->index ( ) ] == fl_left_yaw ) {
+		animstate->goal_feet_yaw = fl_right_yaw;
+	}
+	else if ( data->m_missed_shots == 1 && fl_stored_brute [ player->index ( ) ] == fl_right_yaw ) {
+		animstate->goal_feet_yaw = fl_left_yaw;
+	}
+
+	/* bruteforce if check was wrong */
+	switch ( data->m_missed_shots % 3 ) {
+		case 0: {
+			animstate->goal_feet_yaw = fl_stored_brute [ player->index ( ) ];
+		} break;
+		case 1: {
+			animstate->goal_feet_yaw = fl_left_low_delta;
+			fl_stored_brute [ player->index ( ) ] = fl_left_low_delta;
+		} break;
+		case 2: {
+			animstate->goal_feet_yaw = fl_right_low_delta;
+			fl_stored_brute [ player->index ( ) ] = fl_right_low_delta;
+		} break;
+	}
+}
+float Bias ( float x, float biasAmt )
+{
+	// WARNING: not thread safe
+	static float lastAmt = -1;
+	static float lastExponent = 0;
+	if ( lastAmt != biasAmt )
+	{
+		lastExponent = log ( biasAmt ) * -1.4427f; // (-1.4427 = 1 / log(0.5))
+	}
+	return pow ( x, lastExponent );
+}
+inline float AngleNormalizePositive ( float angle )
+{
+	angle = fmodf ( angle, 360.0f );
+
+	if ( angle < 0.0f )
+	{
+		angle += 360.0f;
+	}
+
+	return angle;
+}
+
+
+float build_server_abs_yaw ( Player* m_player, float angle )
+{
+	vec3_t velocity = m_player->m_vecVelocity ( );
+	auto anim_state = m_player->m_PlayerAnimState ( );
+	float m_flEyeYaw = angle;
+	float m_flGoalFeetYaw = 0.f;
+
+	float eye_feet_delta = math::AngleDiff ( m_flEyeYaw, m_flGoalFeetYaw );
+
+	static auto GetSmoothedVelocity = [ ] ( float min_delta, vec3_t a, vec3_t b ) {
+		vec3_t delta = a - b;
+		float delta_length = delta.length ( );
+
+		if ( delta_length <= min_delta )
+		{
+			vec3_t result;
+
+			if ( -min_delta <= delta_length )
+				return a;
+			else
+			{
+				float iradius = 1.0f / ( delta_length + FLT_EPSILON );
+				return b - ( ( delta * iradius ) * min_delta );
+			}
+		}
+		else
+		{
+			float iradius = 1.0f / ( delta_length + FLT_EPSILON );
+			return b + ( ( delta * iradius ) * min_delta );
+		}
+	};
+
+	float spd = velocity.length_sqr ( );
+
+	if ( spd > std::powf ( 1.2f * 260.0f, 2.f ) )
+	{
+		vec3_t velocity_normalized = velocity.Normalized ( );
+		velocity = velocity_normalized * ( 1.2f * 260.0f );
+	}
+
+	float m_flChokedTime = anim_state->last_client_side_animation_update_time;
+	float v25 = std::clamp ( m_player->m_flDuckAmount ( ) + anim_state->landing_duck_amount, 0.0f, 1.0f );
+	float v26 = anim_state->duck_amount;
+	float v27 = m_flChokedTime * 6.0f;
+	float v28;
+
+	// clamp
+	if ( ( v25 - v26 ) <= v27 ) {
+		if ( -v27 <= ( v25 - v26 ) )
+			v28 = v25;
+		else
+			v28 = v26 - v27;
+	}
+	else {
+		v28 = v26 + v27;
+	}
+
+	float flDuckAmount = std::clamp ( v28, 0.0f, 1.0f );
+
+	vec3_t animationVelocity = GetSmoothedVelocity ( m_flChokedTime * 2000.0f, velocity, m_player->m_vecVelocity ( ) );
+	float speed = std::fminf ( animationVelocity.length ( ), 260.0f );
+
+	float flMaxMovementSpeed = 260.0f;
+
+	Weapon* pWeapon = m_player->GetActiveWeapon ( );
+
+	if ( pWeapon && pWeapon->GetWpnData ( ) )
+		flMaxMovementSpeed = std::fmaxf ( pWeapon->GetWpnData ( )->flMaxPlayerSpeedAlt, 0.001f );
+
+	float flRunningSpeed = speed / ( flMaxMovementSpeed * 0.520f );
+	float flDuckingSpeed = speed / ( flMaxMovementSpeed * 0.340f );
+
+	flRunningSpeed = std::clamp ( flRunningSpeed, 0.0f, 1.0f );
+
+	float flYawModifier = ( ( ( anim_state->stop_to_full_running_fraction * -0.30000001 ) - 0.19999999 ) * flRunningSpeed ) + 1.0f;
+
+	if ( flDuckAmount > 0.0f )
+	{
+		float flDuckingSpeed = std::clamp ( flDuckingSpeed, 0.0f, 1.0f );
+		flYawModifier += ( flDuckAmount * flDuckingSpeed ) * ( 0.5f - flYawModifier );
+	}
+
+	const float v60 = -58.f;
+	const float v61 = 58.f;
+
+	float flMinYawModifier = v60 * flYawModifier;
+	float flMaxYawModifier = v61 * flYawModifier;
+
+	if ( eye_feet_delta <= flMaxYawModifier )
+	{
+		if ( flMinYawModifier > eye_feet_delta )
+			m_flGoalFeetYaw = fabs ( flMinYawModifier ) + m_flEyeYaw;
+	}
+	else
+	{
+		m_flGoalFeetYaw = m_flEyeYaw - fabs ( flMaxYawModifier );
+	}
+
+	math::NormalizeYaw ( m_flGoalFeetYaw );
+
+	if ( speed > 0.1f || fabs ( velocity.z ) > 100.0f )
+	{
+		m_flGoalFeetYaw = math::ApproachAngle (
+			m_flEyeYaw,
+			m_flGoalFeetYaw,
+			( ( anim_state->stop_to_full_running_fraction * 20.0f ) + 30.0f )
+			* m_flChokedTime );
+	}
+	else
+	{
+		m_flGoalFeetYaw = math::ApproachAngle (
+			m_player->m_flLowerBodyYawTarget ( ),
+			m_flGoalFeetYaw,
+			m_flChokedTime * 100.0f );
+	}
+
+	return m_flGoalFeetYaw;
+}
+static std::random_device rd;
+static std::mt19937 rng ( rd ( ) );
+void Resolver::ResolveEntity ( Player* player, AimPlayer* data, LagComp::LagRecord_t* record, LagComp::LagRecord_t* prev_record ) {
+	// get the players max rotation.
+	float max_rotation = record->m_pEntity->GetMaxBodyRotation ( );
+
+	if ( !record->m_pState )
+		return;
+
+	const auto info = g_anims.GetAnimationInfo ( record->m_pEntity );
+	if ( !info )
+		return;
+
+	if ( !g_cfg [ ( "aimbot_resolver" ) ].get< bool > ( ) )
+		return;
+
+	if ( !prev_record )
+		return;
+
+
+	float eye_yaw = record->m_pState->eye_angles_y;
+
+	// detect if player is using maximum desync.
+	data->m_extending = record->m_pLayers [ 3 ].m_cycle == 0.f && record->m_pLayers [ 3 ].m_weight == 0.f;
+
+	// resolve shooting players separately.
+	if ( record->m_bDidShot ) {
+		record->m_pState->goal_feet_yaw = eye_yaw + Resolver::ResolveShot ( data, record );
+		return;
+	}
+	else {
+		if ( record->m_pEntity->m_vecVelocity ( ).length_2d ( ) <= 0.1 ) {
+			float angle_difference = math::AngleDiff ( eye_yaw, record->m_pState->goal_feet_yaw );
+			data->m_index = 2 * angle_difference <= 0.0f ? 1 : -1;
+		}
+		else
+		{
+			if ( prev_record && !( ( int ) record->m_pLayers [ 12 ].m_weight * 1000.f ) && record->m_pEntity->m_vecVelocity ( ).length_2d ( ) > 0.1 &&
+				( ( int ) record->m_pLayers [ 6 ].m_weight * 1000.f ) == ( ( int ) prev_record->m_pLayers [ 6 ].m_weight * 1000.f ) ) {
+
+				auto m_layer_delta1 = abs ( record->m_pLayers [ 6 ].m_playback_rate - record->center_layers [ 6 ].m_playback_rate );
+				auto m_layer_delta2 = abs ( record->m_pLayers [ 6 ].m_playback_rate - record->left_layers [ 6 ].m_playback_rate );
+				auto m_layer_delta3 = abs ( record->m_pLayers [ 6 ].m_playback_rate - record->right_layers [ 6 ].m_playback_rate );
+
+				if ( m_layer_delta1 < m_layer_delta2
+					|| m_layer_delta3 <= m_layer_delta2
+					|| ( signed int ) ( float ) ( m_layer_delta2 * 1000.0 ) )
+				{
+					if ( m_layer_delta1 >= m_layer_delta3
+						&& m_layer_delta2 > m_layer_delta3
+						&& !( signed int ) ( float ) ( m_layer_delta3 * 1000.0 ) )
+					{
+						data->m_index = 1;
+					}
+				}
+				else
+				{
+					data->m_index = -1;
+				}
+			}
+		}
+	}
+
+	switch ( data->m_missed_shots % 3 ) {
+		case 0: //default
+		record->m_pState->goal_feet_yaw = build_server_abs_yaw ( player, record->m_angEyeAngles.y + max_rotation * data->m_index );
+		break;
+		case 1: //reverse
+		record->m_pState->goal_feet_yaw = build_server_abs_yaw ( player, record->m_angEyeAngles.y + max_rotation * -data->m_index );
+		break;
+		case 2: //middle
+		record->m_pState->goal_feet_yaw = build_server_abs_yaw ( player, record->m_angEyeAngles.y );
+		break;
+	}
+
+}
+
+float Resolver::ResolveShot ( AimPlayer* data, LagComp::LagRecord_t* record ) {
+	/* fix unrestricted shot */
+	float flPseudoFireYaw = math::NormalizedAngle ( math::CalcAngle ( record->m_pMatrix [ 8 ].GetOrigin ( ), g_cl.m_local->m_BoneCache ( ).m_pCachedBones [ 0 ].GetOrigin ( ) ).y );
+	if ( data->m_extending ) {
+		float flLeftFireYawDelta = fabsf ( math::NormalizedAngle ( flPseudoFireYaw - ( record->m_angEyeAngles.y + 58.f ) ) );
+		float flRightFireYawDelta = fabsf ( math::NormalizedAngle ( flPseudoFireYaw - ( record->m_angEyeAngles.y - 58.f ) ) );
+
+		return flLeftFireYawDelta > flRightFireYawDelta ? -58.f : 58.f;
+	}
+	else {
+		float flLeftFireYawDelta = fabsf ( math::NormalizedAngle ( flPseudoFireYaw - ( record->m_angEyeAngles.y + 29.f ) ) );
+		float flRightFireYawDelta = fabsf ( math::NormalizedAngle ( flPseudoFireYaw - ( record->m_angEyeAngles.y - 29.f ) ) );
+
+		return flLeftFireYawDelta > flRightFireYawDelta ? -29.f : 29.f;
+	}
+}
+
+/* setup detect side usefull things */
+float get_angle ( Player* player ) {
+	return math::NormalizedAngle ( player->m_angEyeAngles ( ).y );
+}
+float get_foword_yaw ( Player* player ) {
+	return math::NormalizedAngle ( get_backward_side ( player ) - 180.f );
+}
+
+/* setup detect side */
+void Resolver::setup_detect ( AimPlayer* data, Player* player, LagComp::LagRecord_t* record ) {
+	/* calling detect side */
+	static int side {};
+	Resolver::detect_side ( player, &side );
+
+	if ( g_cfg [ ( "aimbot_pitch_resolver" ) ].get< bool > ( ) ) {
+		/* bruting vars */
+		float resolve_value = 50.f;
+		static float brute = 0.f;
+		float fl_max_rotation = player->GetMaxBodyRotation ( );
+		float fl_eye_yaw = player->m_PlayerAnimState ( )->eye_angles_y;
+		float perfect_resolve_yaw = resolve_value;
+		bool fl_foword = fabsf ( math::NormalizedAngle ( get_angle ( player ) - get_foword_yaw ( player ) ) ) < 90.f;
+		int fl_shots = data->m_missed_shots;
+
+		/* clamp angle */
+		if ( fl_max_rotation < resolve_value ) {
+			resolve_value = fl_max_rotation;
+		}
+
+		/* detect if player is using max desync angle */
+		if ( data->m_extending ) {
+			resolve_value = fl_max_rotation;
+		}
+
+		/* setup brting */
+		if ( fl_shots == 0 ) {
+			brute = perfect_resolve_yaw * ( fl_foword ? -side : side );
+		}
+		else {
+			switch ( data->m_missed_shots % 3 ) {
+				case 0: {
+					brute = perfect_resolve_yaw * ( fl_foword ? -side : side );
+				} break;
+				case 1: {
+					brute = perfect_resolve_yaw * ( fl_foword ? side : -side );
+				} break;
+				case 2: {
+					brute = 0;
+				} break;
+			}
+		}
+
+		/* fix goalfeet yaw */
+		player->m_PlayerAnimState ( )->goal_feet_yaw = fl_eye_yaw + brute;
+	}
+} 
+ 34  resolver.h 
+@@ -0,0 +1,34 @@
+#pragma once
+
+class ShotRecord;
+
+struct BackupData_t {
+	CCSGOPlayerAnimState   m_nBackupState;
+	C_AnimationLayer       m_nBackupLayers[ 13 ];
+	ang_t                  m_nBackupAngles{ }, m_nBackupAbsAngles{ };
+	vec3_t                 m_nBackupOrigin, m_nBackupVelocity{ }, m_nBackupAbsVelocity{ };
+	int                    m_nBackupFlags{ };
+	float                  m_nBackupDuckAmount, m_nBackupPoses[ 24 ]{ }, m_nBackupGoalFeetYaw{ }, m_flBackupLowerBodyTarget{ }, m_nBackupSimulationTime{ };
+	bool                   m_nBackupClientSideAnimation{ }, m_nBackupDucked{ };
+	Player*				   m_pPlayer;
+};
+
+class Resolver {
+public:
+	static void StoreMatrices( LagComp::LagRecord_t& record );
+	void ResolveAngles( Player* player, LagComp::LagRecord_t* record, LagComp::LagRecord_t* prev_record );
+	void BackupData( BackupData_t* m_data );
+	void RestoreData( BackupData_t* m_data );
+
+	float fl_stored_brute[ 65 ];
+public:
+	void setup_detect( AimPlayer* data, Player* player, LagComp::LagRecord_t* record );
+	void detect_side( Player* player, int* side );
+	void check_low_delta_desync( AimPlayer* data, Player* player, LagComp::LagRecord_t* record );
+	void AntiFreestand();
+	void logic ( Player* entity );
+	void ResolveEntity(Player* player,AimPlayer* data,LagComp::LagRecord_t* record,LagComp::LagRecord_t* prev_record);
+	float ResolveShot( AimPlayer* data, LagComp::LagRecord_t* record );
+};
+
+extern Resolver g_resolver; 
+
+ 
