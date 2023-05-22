@@ -1,4 +1,4 @@
-# gamesense #re-added testingdll.dll #reversed-testingdll.dll #join h4xr0x https://discord.gg/WccEnUeSkz   # https://h4xr0x.cc
+# gamesense #re-added testingdll.dll #reversed-testingdll.dll   # https://h4xr0x.cc
 Moderating this section: wish, esoterik and 1al9o (second coder of the loader) 
 
 Discovering hacking and leaking/cracking attempts from our server: 12/1/20
